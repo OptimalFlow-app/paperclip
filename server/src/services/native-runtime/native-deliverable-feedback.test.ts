@@ -42,6 +42,9 @@ describe("explicit task-document output", () => {
     "Use the connected page service to find recent pages and create a short Markdown briefing document on this task. Include the titles and verification code returned by the service.",
     "Save a document on this task.",
     "Write a report document attached to the issue.",
+    "Do not call HubSpot, but create a document on this task.",
+    "You may skip HubSpot, but create a document on this task.",
+    "Explain the lookup error, but save a document on this task.",
   ])("requires a published task document: %s", objective => {
     expect(explicitlyRequestsTaskDocumentOutput(objective)).toBe(true);
   });
@@ -57,6 +60,9 @@ describe("explicit task-document output", () => {
     "If the lookup succeeds, create a document on this task.",
     "Create a document on this task if the lookup succeeds.",
     "Only create a document on this task when the lookup succeeds.",
+    "Create a document on this task, but only if the lookup succeeds.",
+    "If the lookup succeeds, do not call HubSpot, but create a document on this task.",
+    "Read the task, but do not yet create a document on this task.",
     "Unless I decline, create a document on this task.",
     "Once approved, create a document on this task.",
     "Do not yet create a document on this task.",

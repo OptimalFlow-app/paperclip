@@ -90,18 +90,23 @@ export function explicitlyRequestsFileOutput(objective: string): boolean {
 export function explicitlyRequestsTaskDocumentOutput(objective: string): boolean {
   // Keep comma-separated conditions with their imperative. This is a narrow
   // unconditional-output guard, not an interpreter of whether a condition held.
-  return objective.split(/(?:[.!?](?:\s|$)|\n|;)/iu).some(clause => {
-    if (/\b(?:if|unless|when|once|otherwise|provided that|in case|optionally)\b/iu.test(clause)) return false;
-    const create = /\b(?:create|make|write|save|publish|prepare|provide|attach)\b/iu.exec(clause);
-    if (!create) return false;
-    const before = clause.slice(0, create.index);
-    if (/\b(?:do not|don['’]t|never|no need to|may|could|can)\b/iu.test(before)) return false;
-    if (/\b(?:explain|describe|discuss|review)\b/iu.test(before)) return false;
-    const output = clause.slice(create.index + create[0].length);
-    return [...output.matchAll(/\b(?:document|doc)\b/giu)].some(match => {
-      const prefix = output.slice(0, match.index);
-      if (/\b(?:of|about|from|using|for|with|without|no|zero)\b/iu.test(prefix)) return false;
-      return /^\s+(?:on|to|in|attached to)\s+(?:this|the|current)\s+(?:task|issue)\b/iu.test(output.slice(match.index + match[0].length));
+  return objective.split(/(?:[.!?](?:\s|$)|\n|;)/iu).some(statement => {
+    // Check conditions before separating contrastive instructions: "create a
+    // document, but only if ..." must not become an unconditional requirement.
+    if (/\b(?:if|unless|when|once|otherwise|provided that|in case)\b/iu.test(statement)) return false;
+    return statement.split(/\bbut\b/iu).some(clause => {
+      if (/\boptionally\b/iu.test(clause)) return false;
+      const create = /\b(?:create|make|write|save|publish|prepare|provide|attach)\b/iu.exec(clause);
+      if (!create) return false;
+      const before = clause.slice(0, create.index);
+      if (/\b(?:do not|don['’]t|never|no need to|may|could|can)\b/iu.test(before)) return false;
+      if (/\b(?:explain|describe|discuss|review)\b/iu.test(before)) return false;
+      const output = clause.slice(create.index + create[0].length);
+      return [...output.matchAll(/\b(?:document|doc)\b/giu)].some(match => {
+        const prefix = output.slice(0, match.index);
+        if (/\b(?:of|about|from|using|for|with|without|no|zero)\b/iu.test(prefix)) return false;
+        return /^\s+(?:on|to|in|attached to)\s+(?:this|the|current)\s+(?:task|issue)\b/iu.test(output.slice(match.index + match[0].length));
+      });
     });
   });
 }

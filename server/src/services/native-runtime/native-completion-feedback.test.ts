@@ -124,6 +124,12 @@ describe("native final-response feedback", () => {
     await db.update(issues).set({ description: objective }).where(eq(issues.id, value.issueId));
     await expect(nativeCompletionFeedback(db, value.runId, done)).resolves.toContain("Completion report accepted");
   });
+  it("enforces a document requested independently of a prohibited service call", async () => {
+    const value = await fixture();
+    await db.delete(issueDocuments).where(eq(issueDocuments.issueId, value.issueId));
+    await db.update(issues).set({ description: "Do not call HubSpot, but create a document on this task." }).where(eq(issues.id, value.issueId));
+    await expect(nativeCompletionFeedback(db, value.runId, done)).rejects.toThrow("write_document");
+  });
   it("does not accept a stale task-document receipt or another task's document", async () => {
     const value = await fixture(), foreign = await fixture();
     await db.update(issues).set({ description: "Save a document on this task." }).where(eq(issues.id, value.issueId));
