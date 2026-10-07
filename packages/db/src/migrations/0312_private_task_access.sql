@@ -132,10 +132,11 @@ BEGIN
   RETURN NEW;
 END $$;
 --> statement-breakpoint
-DROP TRIGGER IF EXISTS heartbeat_runs_set_scope_kind ON heartbeat_runs;
---> statement-breakpoint
-CREATE TRIGGER heartbeat_runs_set_scope_kind BEFORE INSERT OR UPDATE OF issue_id, native_issue_id, context_snapshot, scope_kind
-  ON heartbeat_runs FOR EACH ROW EXECUTE FUNCTION set_heartbeat_run_scope_kind();
+DO $$ BEGIN
+  DROP TRIGGER IF EXISTS heartbeat_runs_set_scope_kind ON heartbeat_runs;
+  CREATE TRIGGER heartbeat_runs_set_scope_kind BEFORE INSERT OR UPDATE OF issue_id, native_issue_id, context_snapshot, scope_kind
+    ON heartbeat_runs FOR EACH ROW EXECUTE FUNCTION set_heartbeat_run_scope_kind();
+END $$;
 --> statement-breakpoint
 -- Indexed primary-key keyset batches visit each historical run once. Missing
 -- source tasks become issue-scoped tombstones, never company-visible run content.
@@ -180,10 +181,11 @@ BEGIN
   RETURN NEW;
 END $$;
 --> statement-breakpoint
-DROP TRIGGER IF EXISTS execution_workspaces_privacy_sources ON execution_workspaces;
---> statement-breakpoint
-CREATE TRIGGER execution_workspaces_privacy_sources BEFORE INSERT OR UPDATE OF source_issue_id, metadata
-  ON execution_workspaces FOR EACH ROW EXECUTE FUNCTION retain_workspace_privacy_sources();
+DO $$ BEGIN
+  DROP TRIGGER IF EXISTS execution_workspaces_privacy_sources ON execution_workspaces;
+  CREATE TRIGGER execution_workspaces_privacy_sources BEFORE INSERT OR UPDATE OF source_issue_id, metadata
+    ON execution_workspaces FOR EACH ROW EXECUTE FUNCTION retain_workspace_privacy_sources();
+END $$;
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION record_issue_workspace_privacy_source() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -194,10 +196,11 @@ BEGIN
   RETURN NEW;
 END $$;
 --> statement-breakpoint
-DROP TRIGGER IF EXISTS issues_record_workspace_privacy_source ON issues;
---> statement-breakpoint
-CREATE TRIGGER issues_record_workspace_privacy_source AFTER INSERT OR UPDATE OF execution_workspace_id
-  ON issues FOR EACH ROW EXECUTE FUNCTION record_issue_workspace_privacy_source();
+DO $$ BEGIN
+  DROP TRIGGER IF EXISTS issues_record_workspace_privacy_source ON issues;
+  CREATE TRIGGER issues_record_workspace_privacy_source AFTER INSERT OR UPDATE OF execution_workspace_id
+    ON issues FOR EACH ROW EXECUTE FUNCTION record_issue_workspace_privacy_source();
+END $$;
 --> statement-breakpoint
 DO $$ DECLARE cursor_id uuid := '00000000-0000-0000-0000-000000000000'; next_id uuid;
 BEGIN LOOP
@@ -227,10 +230,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 --> statement-breakpoint
-DROP TRIGGER IF EXISTS workspace_operations_keep_privacy_sources ON workspace_operations;
---> statement-breakpoint
-CREATE TRIGGER workspace_operations_keep_privacy_sources BEFORE INSERT OR UPDATE ON workspace_operations
-FOR EACH ROW EXECUTE FUNCTION paperclip_keep_operation_privacy_sources();
+DO $$ BEGIN
+  DROP TRIGGER IF EXISTS workspace_operations_keep_privacy_sources ON workspace_operations;
+  CREATE TRIGGER workspace_operations_keep_privacy_sources BEFORE INSERT OR UPDATE ON workspace_operations
+  FOR EACH ROW EXECUTE FUNCTION paperclip_keep_operation_privacy_sources();
+END $$;
 --> statement-breakpoint
 DO $$
 DECLARE cursor_id uuid := '00000000-0000-0000-0000-000000000000'; batch_ids uuid[];
@@ -259,7 +263,7 @@ BEGIN
     ) batch;
     EXIT WHEN batch_ids IS NULL;
     UPDATE projects p SET privacy_owner_user_id = COALESCE(p.personal_owner_user_id, (
-      SELECT CASE WHEN a.actor_type = 'user' THEN a.actor_id ELSE r.responsible_user_id END
+      SELECT CASE WHEN a.actor_type = 'user' THEN a.actor_id ELSE coalesce(a.responsible_user_id, r.responsible_user_id) END
       FROM activity_log a LEFT JOIN heartbeat_runs r ON r.id = a.run_id AND r.company_id = a.company_id
       WHERE a.company_id = p.company_id AND a.entity_type = 'project' AND a.entity_id = p.id::text AND a.action = 'project.created'
       ORDER BY a.created_at, a.id LIMIT 1

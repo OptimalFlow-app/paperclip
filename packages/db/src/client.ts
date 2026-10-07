@@ -482,61 +482,75 @@ async function applyPendingMigrationsManually(
     journalEntries.map((entry) => [entry.fileName, normalizeFolderMillis(entry.folderMillis)]),
   );
 
-  const sql = createUtilitySql(url);
+  const pool = createUtilitySql(url);
   try {
-    const { migrationTableSchema, columnNames } = await ensureMigrationJournalTable(sql);
-    const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
+    const sql = await pool.reserve();
+    try {
+      // A session lock survives each batch COMMIT. Reserve the connection so
+      // pool rotation cannot release it while another migrator is waiting.
+      await sql`SELECT pg_advisory_lock(hashtextextended('paperclip:migrations', 0))`;
+      const { migrationTableSchema, columnNames } = await ensureMigrationJournalTable(sql);
+      const qualifiedTable = `${quoteIdentifier(migrationTableSchema)}.${quoteIdentifier(DRIZZLE_MIGRATIONS_TABLE)}`;
 
-    for (const migrationFile of orderedPendingMigrations) {
-      const migrationContent = await readMigrationFileContent(migrationFile);
-      const hash = createHash("sha256").update(migrationContent).digest("hex");
-      const existingEntry = await migrationHistoryEntryExists(
-        sql,
-        qualifiedTable,
-        columnNames,
-        migrationFile,
-        hash,
-      );
-      if (existingEntry) continue;
-
-      const applyMigration = async () => {
-        for (const statement of splitMigrationStatements(migrationContent)) {
-          if (MIGRATIONS_WITH_BATCH_COMMITS.has(migrationFile)) {
-            // A cancelled concurrent build leaves an invalid index. IF NOT
-            // EXISTS alone would skip it on retry and journal an incomplete index.
-            const index = statement.replace(/^\s*--.*$/gm, "").trim()
-              .match(/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS "([A-Za-z_][A-Za-z0-9_]*)"/i);
-            if (index) {
-              const invalid = await sql<{ invalid: boolean }[]>`
-                SELECT NOT i.indisvalid AS invalid FROM pg_index i
-                JOIN pg_class c ON c.oid = i.indexrelid
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public' AND c.relname = ${index[1]}`;
-              if (invalid[0]?.invalid) {
-                await sql.unsafe(`DROP INDEX CONCURRENTLY ${quoteIdentifier("public")}.${quoteIdentifier(index[1])}`);
-              }
-            }
-          }
-          await sql.unsafe(statement);
-        }
-
-        await recordMigrationHistoryEntry(
+      for (const migrationFile of orderedPendingMigrations) {
+        const migrationContent = await readMigrationFileContent(migrationFile);
+        const hash = createHash("sha256").update(migrationContent).digest("hex");
+        const existingEntry = await migrationHistoryEntryExists(
           sql,
           qualifiedTable,
           columnNames,
           migrationFile,
           hash,
-          folderMillisByFileName.get(migrationFile) ?? Date.now(),
         );
-      };
-      if (MIGRATIONS_WITH_BATCH_COMMITS.has(migrationFile)) {
-        await applyMigration();
-      } else {
-        await runInTransaction(sql, applyMigration);
+        if (existingEntry) continue;
+
+        const applyMigration = async () => {
+          for (const statement of splitMigrationStatements(migrationContent)) {
+            if (MIGRATIONS_WITH_BATCH_COMMITS.has(migrationFile)) {
+              // A cancelled concurrent build leaves an invalid index. IF NOT
+              // EXISTS alone would skip it on retry and journal an incomplete index.
+              const index = statement.replace(/^\s*--.*$/gm, "").trim()
+                .match(/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS "([A-Za-z_][A-Za-z0-9_]*)"/i);
+              if (index) {
+                const invalid = await sql<{ invalid: boolean }[]>`
+                  SELECT NOT i.indisvalid AS invalid FROM pg_index i
+                  JOIN pg_class c ON c.oid = i.indexrelid
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = 'public' AND c.relname = ${index[1]}`;
+                if (invalid[0]?.invalid) {
+                  await sql.unsafe(`DROP INDEX CONCURRENTLY ${quoteIdentifier("public")}.${quoteIdentifier(index[1])}`);
+                }
+              }
+            }
+            await sql.unsafe(statement);
+          }
+
+          await recordMigrationHistoryEntry(
+            sql,
+            qualifiedTable,
+            columnNames,
+            migrationFile,
+            hash,
+            folderMillisByFileName.get(migrationFile) ?? Date.now(),
+          );
+        };
+        if (MIGRATIONS_WITH_BATCH_COMMITS.has(migrationFile)) {
+          await applyMigration();
+        } else {
+          await runInTransaction(sql, applyMigration);
+        }
       }
+    } finally {
+      try {
+        await sql`SELECT pg_advisory_unlock(hashtextextended('paperclip:migrations', 0))`;
+      } catch {
+        // Preserve the migration error if the session died; PostgreSQL releases
+        // its lock on disconnect, and pool.end() closes any remaining connection.
+      }
+      sql.release();
     }
   } finally {
-    await sql.end();
+    await pool.end();
   }
 }
 

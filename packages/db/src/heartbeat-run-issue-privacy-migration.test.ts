@@ -11,6 +11,7 @@ import {
 const MIGRATION_FILE = "0312_private_task_access.sql";
 const cleanups: Array<() => Promise<void>> = [];
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+if (!embeddedPostgresSupport.supported) console.warn(`Private-task migration checks unavailable: ${embeddedPostgresSupport.reason}`);
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 async function migrationHash() {
@@ -71,7 +72,22 @@ describeEmbeddedPostgres("heartbeat run issue privacy migration", () => {
     await sql`INSERT INTO project_access_members (company_id, project_id, subject_type, subject_id)
       VALUES (${companyId}, ${legacyProjectId}, 'user', 'ordinary-reader')`;
 
+    const agentProjectId = randomUUID(), runProjectId = randomUUID(), preferredProjectId = randomUUID();
+    await sql`UPDATE heartbeat_runs SET responsible_user_id = 'run-owner' WHERE id = ${secondRunId}`;
+    await sql`INSERT INTO projects (id, company_id, name, visibility) VALUES
+      (${agentProjectId}, ${companyId}, 'Agent API project', 'private'),
+      (${runProjectId}, ${companyId}, 'Run-backed project', 'private'),
+      (${preferredProjectId}, ${companyId}, 'Recorded owner project', 'private')`;
+    await sql`INSERT INTO activity_log (company_id, actor_type, actor_id, responsible_user_id, run_id, action, entity_type, entity_id) VALUES
+      (${companyId}, 'agent', ${agentId}, 'activity-owner', NULL, 'project.created', 'project', ${agentProjectId}),
+      (${companyId}, 'agent', ${agentId}, NULL, ${secondRunId}, 'project.created', 'project', ${runProjectId}),
+      (${companyId}, 'agent', ${agentId}, 'activity-owner', ${secondRunId}, 'project.created', 'project', ${preferredProjectId})`;
+
     await applyPendingMigrations(database.connectionString);
+    for (const [projectId, owner] of [[agentProjectId, 'activity-owner'], [runProjectId, 'run-owner'], [preferredProjectId, 'activity-owner']]) {
+      expect(await sql`SELECT privacy_owner_user_id FROM projects WHERE id = ${projectId}`).toEqual([{ privacy_owner_user_id: owner }]);
+      expect(await sql`SELECT subject_id FROM project_access_members WHERE project_id = ${projectId}`).toEqual([{ subject_id: owner }]);
+    }
     const [legacyProject] = await sql`SELECT privacy_owner_user_id FROM projects WHERE id = ${legacyProjectId}`;
     expect(legacyProject.privacy_owner_user_id).toBe('original-owner');
     expect(await sql`SELECT subject_id FROM project_access_members WHERE project_id = ${legacyProjectId} ORDER BY subject_id`)
@@ -200,6 +216,7 @@ describeEmbeddedPostgres("heartbeat run issue privacy migration", () => {
     await sql`DELETE FROM drizzle.__drizzle_migrations WHERE hash = ${hash}`;
     await sql`SELECT pg_advisory_lock(736319937)`;
     const migration = applyPendingMigrations(database.connectionString).then(() => null, error => error);
+    let contender: Promise<unknown> | undefined;
     try {
       // The second batch is blocked while another session can see the first
       // committed batch and write a row whose lock has already been released.
@@ -208,6 +225,15 @@ describeEmbeddedPostgres("heartbeat run issue privacy migration", () => {
           WHERE company_id = ${companyId} AND scope_kind = 'issue'`;
         return row.n;
       }, { timeout: 10_000 }).toBe(1000);
+      // The session lock survives batch commits and blocks another migrator.
+      contender = applyPendingMigrations(database.connectionString).then(() => null, error => error);
+      await expect.poll(async () => {
+        const [row] = await sql`SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event = 'advisory'
+            AND strpos(query, 'paperclip:migrations') > 0`;
+        return row.n;
+      }, { timeout: 10_000 }).toBe(1);
+      expect(await sql`SELECT hash FROM drizzle.__drizzle_migrations WHERE hash = ${hash}`).toHaveLength(0);
       await sql`SET lock_timeout = '500ms'`;
       await sql`UPDATE heartbeat_runs SET context_snapshot = context_snapshot || '{"probe":"visible"}'::jsonb
         WHERE id = ${runId(1)}`;
@@ -216,18 +242,44 @@ describeEmbeddedPostgres("heartbeat run issue privacy migration", () => {
     } finally {
       await sql`SELECT pg_advisory_unlock(736319937)`;
       await sql`RESET lock_timeout`;
+      await migration;
+      await contender;
     }
     expect(await migration).toMatchObject({ message: "fixture interrupted second batch" });
+    expect(await contender).toMatchObject({ message: "fixture interrupted second batch" });
     expect(await sql`SELECT hash FROM drizzle.__drizzle_migrations WHERE hash = ${hash}`).toHaveLength(0);
     await sql`DROP TRIGGER zzz_interrupt_privacy_batch_fixture ON heartbeat_runs`;
     await sql`DROP FUNCTION interrupt_privacy_batch_fixture()`;
-    await applyPendingMigrations(database.connectionString);
+    await Promise.all([applyPendingMigrations(database.connectionString), applyPendingMigrations(database.connectionString)]);
     const [finished] = await sql`SELECT count(*)::int AS n FROM heartbeat_runs
       WHERE company_id = ${companyId} AND scope_kind = 'issue' AND issue_id = ${issueId}`;
     expect(finished.n).toBe(1001);
     expect(await sql`SELECT indisvalid FROM pg_index WHERE indexrelid = 'heartbeat_runs_company_issue_created_idx'::regclass`)
       .toEqual([{ indisvalid: true }]);
     expect(await sql`SELECT hash FROM drizzle.__drizzle_migrations WHERE hash = ${hash}`).toHaveLength(1);
+  }, 30_000);
+
+  it("keeps all privacy triggers installed when replacement is interrupted", async () => {
+    const database = await startEmbeddedPostgresTestDatabase("paperclip-privacy-trigger-atomic-");
+    cleanups.push(database.cleanup);
+    const sql = postgres(database.connectionString, { max: 1, onnotice: () => {} });
+    cleanups.push(async () => sql.end());
+    const content = await fs.promises.readFile(new URL(`./migrations/${MIGRATION_FILE}`, import.meta.url), "utf8");
+    const replacements = content.split("--> statement-breakpoint").filter(statement => /DROP TRIGGER IF EXISTS/.test(statement));
+    expect(replacements).toHaveLength(4);
+    for (const statement of replacements) {
+      const name = statement.match(/DROP TRIGGER IF EXISTS ([A-Za-z_]+)/)![1];
+      const interrupted = statement.replace("CREATE TRIGGER", "RAISE EXCEPTION 'fixture interrupted trigger replacement';\n  CREATE TRIGGER");
+      await expect(sql.unsafe(interrupted)).rejects.toThrow("fixture interrupted trigger replacement");
+      expect(await sql`SELECT tgname FROM pg_trigger WHERE tgname = ${name} AND NOT tgisinternal`).toEqual([{ tgname: name }]);
+    }
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    await sql`INSERT INTO companies (id, name, issue_prefix) VALUES (${companyId}, 'Atomic triggers', 'ATR')`;
+    await sql`INSERT INTO agents (id, company_id, name, adapter_type) VALUES (${agentId}, ${companyId}, 'Runner', 'process')`;
+    await sql`INSERT INTO issues (id, company_id, title, visibility) VALUES (${issueId}, ${companyId}, 'Private', 'private')`;
+    expect(await sql`INSERT INTO heartbeat_runs (company_id, agent_id, status, context_snapshot)
+      VALUES (${companyId}, ${agentId}, 'succeeded', ${sql.json({ taskId: issueId })}) RETURNING issue_id, scope_kind`)
+      .toEqual([{ issue_id: issueId, scope_kind: "issue" }]);
   }, 30_000);
 
 });
