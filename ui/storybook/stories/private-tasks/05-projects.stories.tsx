@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, within, waitFor } from "storybook/test";
 import { ProjectProperties } from "@/components/ProjectProperties";
+import { IssueShareSheet } from "@/components/IssueShareSheet";
+import { Button } from "@/components/ui/button";
 import { ProjectAccessMembers } from "@/components/ProjectAccessMembers";
 import { projectsApi } from "@/api/projects";
 import {
@@ -191,4 +193,52 @@ export const MobileMembers: Story = {
 export const LightProjectSettings: Story = {
   globals: { theme: "light" },
   render: (args) => <ProjectStory {...args} settings />,
+};
+
+export const OpenProjectConfirmation: Story = {
+  render: (args) => <ProjectStory {...args} settings />,
+  parameters: { docs: { description: { story: "Before opening a private project, the owner sees that project-only access to private tasks will end and can share tasks directly first." } } },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("switch", { name: "Private project" }));
+    await expect(await page.findByRole("alertdialog")).toHaveTextContent("will lose access");
+  },
+};
+export const OpenProjectAudienceCopy: Story = {
+  ...OpenProjectConfirmation,
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("switch", { name: "Private project" }));
+    const dialog = await page.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open to company" }));
+    await expect(await page.findByText(/Everyone in the company can discover this project/)).toBeVisible();
+    await expect(page.queryByRole("button", { name: "Manage access" })).not.toBeInTheDocument();
+  },
+};
+export const MobileOpenProjectConfirmation: Story = { ...OpenProjectConfirmation, globals: mobile };
+function ProjectAudienceJourney() {
+  const state = usePrivacyStory();
+  const [open, setOpen] = useState(false);
+  return <StoryFrame title="Project membership and task audience" story="Removing project access updates a previously opened task share sheet." checks={[]}>
+    <Button onClick={() => setOpen(true)}>View task audience</Button>
+    <ProjectAccessMembers project={state.projects[0]!} canManage />
+    <IssueShareSheet issueId="privacy-root" companyId={state.projects[0]!.companyId} canManage open={open} onOpenChange={setOpen} />
+  </StoryFrame>;
+}
+export const MembershipUpdatesTaskAudience: Story = {
+  render: () => <ProjectAudienceJourney />,
+  parameters: { privacy: { taskProject: true, grants: "empty" }, docs: { description: { story: "Open the task audience, remove Morgan from the project, then reopen that cached share sheet. Project-only access disappears without reloading the page." } } },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("button", { name: "View task audience" }));
+    await expect(await page.findByText("Morgan Reed")).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(page.getByRole("button", { name: "Manage access" }));
+    await userEvent.click(await page.findByRole("button", { name: "Remove Morgan Reed" }));
+    await page.findByText("Project access removed");
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(page.getByRole("button", { name: "View task audience" }));
+    const dialog = await page.findByRole("dialog", { name: "Who can access this task" });
+    await waitFor(() => expect(within(dialog).queryByText("Morgan Reed")).not.toBeInTheDocument());
+  },
 };

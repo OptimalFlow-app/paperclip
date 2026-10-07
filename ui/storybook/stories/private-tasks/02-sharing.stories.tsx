@@ -209,3 +209,19 @@ export const SearchPeopleAndAgents: Story = {
   },
 };
 export const MobileSearchPeopleAndAgents: Story = { ...SearchPeopleAndAgents, globals: mobile };
+
+export const AddDirectGrantAlongsideInheritedAccess: Story = {
+  parameters: { privacy: { grants: "inherited" }, docs: { description: { story: "Give Morgan an independent grant to this child before removing parent access. The dropdown includes people whose current access is inherited." } } },
+  render: () => <Sharing add="choose" child />,
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const dialog = await page.findByRole("dialog", { name: "Who can access this task" });
+    const trigger = within(dialog).getByRole("combobox");
+    if (trigger.getAttribute("aria-expanded") !== "true") await userEvent.click(trigger);
+    await userEvent.click(await page.findByRole("option", { name: "Morgan Reed" }));
+    await userEvent.click(page.getByRole("button", { name: "Add" }));
+    await page.findByText("Access granted");
+    await expect(await page.findByRole("button", { name: "Revoke" })).toBeEnabled();
+  },
+};
+export const MobileIndependentChildGrant: Story = { ...AddDirectGrantAlongsideInheritedAccess, globals: mobile };

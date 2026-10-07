@@ -17,9 +17,11 @@ function act(callback: () => void | Promise<void>) {
   return result;
 }
 
+const originalScrollIntoView = Element.prototype.scrollIntoView;
 const listAccessGrants = vi.fn();
 const createAccessGrant = vi.fn();
 const revokeAccessGrant = vi.fn();
+const listUserDirectory = vi.fn();
 
 vi.mock("@/api/issues", () => ({
   issuesApi: {
@@ -29,7 +31,7 @@ vi.mock("@/api/issues", () => ({
   },
 }));
 vi.mock("@/api/access", () => ({
-  accessApi: { listUserDirectory: vi.fn().mockResolvedValue({ users: [] }) },
+  accessApi: { listUserDirectory: (...args: unknown[]) => listUserDirectory(...args) },
 }));
 vi.mock("@/api/agents", () => ({
   agentsApi: { list: vi.fn().mockResolvedValue([]) },
@@ -75,18 +77,23 @@ describe("IssueShareSheet", () => {
   let root: Root | null;
 
   beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    Element.prototype.scrollIntoView = () => {};
     container = document.createElement("div");
     document.body.appendChild(container);
     root = null;
     listAccessGrants.mockReset();
     createAccessGrant.mockReset();
     revokeAccessGrant.mockReset();
+    listUserDirectory.mockReset().mockResolvedValue({ users: [] });
   });
 
   afterEach(() => {
     if (root) act(() => root?.unmount());
     container.remove();
     document.body.innerHTML = "";
+    vi.unstubAllGlobals();
+    Element.prototype.scrollIntoView = originalScrollIntoView;
   });
 
   async function renderSheet(canManage = true, implicitPrincipals: import("./IssueShareSheet").ShareSheetImplicitPrincipal[] = []) {
@@ -146,6 +153,28 @@ describe("IssueShareSheet", () => {
     act(() => confirm!.click());
     await settle();
     expect(revokeAccessGrant).toHaveBeenCalledWith("i1", "g1");
+  });
+
+  it.each([
+    { source: "project" as const, inherited: true },
+    { source: "explicit" as const, inherited: true },
+    { source: "assignment" as const, inherited: false },
+  ])("allows an independent direct grant alongside $source access", async (access) => {
+    listAccessGrants.mockResolvedValue([grant({ id: "broader", ...access })]);
+    listUserDirectory.mockResolvedValue({ users: [{ user: { id: "u1", name: "Ada", email: "ada@example.test", image: null } }] });
+    createAccessGrant.mockResolvedValue(grant({ id: "direct" }));
+    await renderSheet();
+    act(() => [...document.body.querySelectorAll("button")].find(button => button.textContent?.trim() === "Add someone")!.click());
+    await settle();
+    act(() => (document.body.querySelector('[role="combobox"]') as HTMLElement).click());
+    await settle();
+    const option = [...document.body.querySelectorAll('[role="option"]')].find(option => option.textContent?.includes("Ada"));
+    expect(option).toBeDefined();
+    act(() => (option as HTMLElement).click());
+    await settle();
+    act(() => [...document.body.querySelectorAll("button")].find(button => button.textContent?.trim() === "Add")!.click());
+    await settle();
+    expect(createAccessGrant).toHaveBeenCalledWith("i1", { subjectType: "user", subjectId: "u1" });
   });
 
   it("hides Revoke entirely for non-setters", async () => {

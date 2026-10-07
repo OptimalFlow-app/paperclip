@@ -4,10 +4,11 @@ import creation from "./01-creation.stories";
 import sharing, {
   ShareChildWithPerson,
   RemoveCurrentAssigneesSavedGrant,
+  AddDirectGrantAlongsideInheritedAccess,
 } from "./02-sharing.stories";
 import actions from "./03-task-actions.stories";
 import { RemovablePrivateBlocker } from "./04-references-and-blockers.stories";
-import projects from "./05-projects.stories";
+import projects, { MembershipUpdatesTaskAudience, OpenProjectAudienceCopy } from "./05-projects.stories";
 import {
   openProjectMemberPicker,
   choosePrivateTask,
@@ -188,3 +189,7 @@ export const OwnerAddsProjectMember: Story = {
     });
   },
 };
+
+export const OwnerKeepsChildAccessIndependent: Story = { ...AddDirectGrantAlongsideInheritedAccess, name: "Owner · Add a child grant before removing parent access" };
+export const OwnerRemovesProjectOnlyTaskAccess: Story = { ...MembershipUpdatesTaskAudience, name: "Project owner · Remove a member and check the task audience" };
+export const OwnerOpensProjectWithPrivateTasks: Story = { ...OpenProjectAudienceCopy, name: "Project owner · Review access loss before opening the project" };

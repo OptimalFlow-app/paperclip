@@ -42,6 +42,7 @@ export type PrivacyScenario = {
   personal?: boolean;
   draft?: boolean;
   classic?: boolean;
+  taskProject?: boolean;
 };
 
 export const privacyUsers = [
@@ -211,7 +212,7 @@ export function createPrivacyState(options: PrivacyScenario = {}) {
     }),
   ];
   const tasks = [
-    privacyTask({ visibility: options.visibility ?? "private" }),
+    privacyTask({ visibility: options.visibility ?? "private", ...(options.taskProject ? { projectId: project.id, project } : {}) }),
     privacyTask({
       id: "privacy-child",
       identifier: "PAP-411",
@@ -424,8 +425,14 @@ export function installPrivacyApi(state: PrivacyState) {
       if (method === "POST") {
         const error = fail("create");
         if (error) return error;
+        const parent = state.tasks.find(task => task.id === data.parentId);
+        const project = state.projects.find(project => project.id === data.projectId);
+        const inheritedPrivate = parent?.visibility === "private" || project?.visibility === "private";
         const issue = privacyTask({
+          visibility: "open",
+          privacyRootIssueId: null,
           ...data,
+          ...(inheritedPrivate ? { visibility: "private", privacyRootIssueId: parent?.privacyRootIssueId ?? "privacy-created" } : {}),
           id: "privacy-created",
           identifier: "PAP-414",
           responsibleUserId: privacyOwnerId,
@@ -494,7 +501,15 @@ export function installPrivacyApi(state: PrivacyState) {
         if (method === "GET")
           return state.options.loading === "grants"
             ? pause(init?.signal)
-            : (fail("grants") ?? json(state.grants));
+            : (fail("grants") ?? json([
+              ...state.grants.filter(grant => !state.options.taskProject || grant.source !== "project"),
+              ...(state.options.taskProject && state.projects[0]?.visibility === "private"
+                ? state.members.filter(member => member.subjectId !== privacyOwnerId).map(member => privacyGrant({
+                    id: "project-" + member.id, issueId: item.id, subjectType: member.subjectType,
+                    subjectId: member.subjectId, subjectDisplayName: member.subjectDisplayName,
+                    source: "project", inherited: true,
+                  })) : []),
+            ]));
         const error = fail("add");
         if (error) return error;
         const subject = [...privacyUsers, ...privacyAgents].find(

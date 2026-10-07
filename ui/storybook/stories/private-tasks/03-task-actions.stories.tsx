@@ -13,11 +13,11 @@ import {
   usePrivacyStory,
 } from "./PrivacyStory";
 
-function PrivacyActionsStory() {
+function PrivacyActionsStory({ child = false }: { child?: boolean }) {
   const state = usePrivacyStory();
   const { data: issue } = useQuery({
-    queryKey: queryKeys.issues.detail("privacy-root"),
-    queryFn: () => issuesApi.get("privacy-root"),
+    queryKey: queryKeys.issues.detail(child ? "privacy-child" : "privacy-root"),
+    queryFn: () => issuesApi.get(child ? "privacy-child" : "privacy-root"),
   });
   return (
     <StoryFrame
@@ -113,4 +113,42 @@ export const MakePublicFailure: Story = {
 export const MobileConfirmation: Story = {
   ...MakePublicConfirmation,
   globals: mobile,
+};
+
+export const InheritedPrivateParent: Story = {
+  render: () => <PrivacyActionsStory child />,
+  parameters: { docs: { description: { story: "Make public is disabled while a private parent controls this task. Hover or focus explains that the task must be moved first." } } },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const button = await page.findByRole("button", { name: "Make public" });
+    await expect(button).toBeDisabled();
+    await userEvent.hover(button.parentElement!);
+    await expect(await page.findByRole("tooltip")).toHaveTextContent("private parent");
+  },
+};
+export const PrivateProjectRestriction: Story = {
+  parameters: { privacy: { taskProject: true } },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const button = await page.findByRole("button", { name: "Make public" });
+    await waitFor(() => expect(button).toBeDisabled());
+    await userEvent.hover(button.parentElement!);
+    await expect(await page.findByRole("tooltip")).toHaveTextContent("private project");
+  },
+};
+export const PersonalProjectCanMakePublic: Story = {
+  parameters: { privacy: { taskProject: true, personal: true } },
+  play: async ({ canvasElement }) => {
+    await waitFor(() => expect(within(canvasElement).getByRole("button", { name: "Make public" })).toBeEnabled());
+  },
+};
+export const RetryInheritedAccessCheck: Story = {
+  render: () => <PrivacyActionsStory child />,
+  parameters: { privacy: { failure: "parent", retryOnce: true } },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("button", { name: "Retry access check" }));
+    await waitFor(() => expect(page.queryByRole("button", { name: "Retry access check" })).not.toBeInTheDocument());
+    await expect(page.getByRole("button", { name: "Make public" })).toBeDisabled();
+  },
 };

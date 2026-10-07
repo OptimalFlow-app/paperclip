@@ -70,6 +70,8 @@ export function ProjectAccessMembers({ project, canManage }: { project: Project;
     onSuccess: () => {
       setSelection("");
       queryClient.invalidateQueries({ queryKey: membersKey });
+      // Project membership changes task access, descendants and cached discovery.
+      queryClient.invalidateQueries({ queryKey: ["issues"] });
       pushToast({ title: "Project access added", tone: "success" });
     },
     onError: (error) => pushToast({ title: "Couldn't add project access", body: (error as Error).message, tone: "error" }),
@@ -78,6 +80,8 @@ export function ProjectAccessMembers({ project, canManage }: { project: Project;
     mutationFn: (memberId: string) => projectsApi.removeAccessMember(project.id, memberId, project.companyId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: membersKey });
+      // Project membership changes task access, descendants and cached discovery.
+      queryClient.invalidateQueries({ queryKey: ["issues"] });
       pushToast({ title: "Project access removed", tone: "success" });
     },
     onError: (error) => pushToast({ title: "Couldn't remove project access", body: (error as Error).message, tone: "error" }),

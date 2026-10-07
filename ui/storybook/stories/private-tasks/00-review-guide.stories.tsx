@@ -17,14 +17,14 @@ const surfaces = [
     "Added",
     "02 Sharing",
     "all-access-sources",
-    "All four grant sources; implicit roles; read-only; inherited; retained assignment grants; add/revoke; confirmations; agent cautions; loading/error/retry; long names; mobile/light.",
+    "All four grant sources; implicit roles; read-only; inherited and independent direct child grants; retained assignment grants; add/revoke; confirmations; agent cautions; loading/error/retry; long names; mobile/light.",
   ],
   [
     "IssuePrivacyActions",
     "Added",
     "03 Task actions",
     "private-owner",
-    "Private/open owner; reader permissions; admin; public confirmation and failed save; mobile.",
+    "Private/open owner; inherited parent/project restrictions; personal-project escape; access retry; reader/admin; public confirmation and failed save; mobile.",
   ],
   [
     "LockedIssueChip",
@@ -66,7 +66,7 @@ const surfaces = [
     "Changed",
     "05 Projects",
     "private-project-settings",
-    "Open/private/personal project; owner/reader/admin gates; full settings context; light theme.",
+    "Open/private/personal project; audience copy; access-loss confirmation; owner/reader/admin gates; full settings context; light/mobile.",
   ],
   [
     "ProjectAccessMembers",

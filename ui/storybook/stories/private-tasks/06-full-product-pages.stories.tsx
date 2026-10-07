@@ -178,3 +178,14 @@ export const ClassicSharedChild: Story = {
 export const PrivateProjectsInNavigation: Story = { parameters: { docs: { description: { story: "Route /PAP/projects. Private project locks sit on the right in the list and starred navigation." } } }, render: () => <PrivacyPage projects /> };
 export const ClassicPrivateProjects: Story = { parameters: { privacy: { classic: true } }, render: () => <PrivacyPage projects /> };
 export const MobilePrivateProjects: Story = { globals: mobile, render: () => <PrivacyPage projects /> };
+
+export const OwnerInheritedTaskMenu: Story = {
+  render: () => <PrivacyPage child />,
+  parameters: { docs: { description: { story: "Actual /PAP/issues/PAP-411 page: sharing remains available, while Make public explains the private parent restriction." } } },
+  play: async ({ canvasElement }) => {
+    const page = await openTaskMenu(canvasElement);
+    await expect(page.getByRole("button", { name: "Share…" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Make public" })).toBeDisabled();
+  },
+};
+export const MobileInheritedTaskMenu: Story = { ...OwnerInheritedTaskMenu, globals: mobile };

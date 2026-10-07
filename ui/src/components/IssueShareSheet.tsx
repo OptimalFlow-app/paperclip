@@ -207,7 +207,8 @@ export function IssueShareSheet({
     [grantsQuery.data],
   );
   const grantedSubjectKeys = useMemo(
-    () => new Set(activeGrants.map((grant) => `${grant.subjectType}:${grant.subjectId}`)),
+    () => new Set(activeGrants.filter((grant) => !grant.inherited && (grant.source === "explicit" || grant.source === "owner"))
+      .map((grant) => `${grant.subjectType}:${grant.subjectId}`)),
     [activeGrants],
   );
 
@@ -238,7 +239,8 @@ export function IssueShareSheet({
   });
 
   // Candidate subjects for the "Add someone" combobox, minus anyone who already
-  // holds an active grant. Value encodes both type and id: `type:id`.
+  // holds a direct grant on this task. Inherited/project access can be supplemented
+  // with an independent child grant before broader access is removed. Value encodes both type and id: `type:id`.
   const addGroups = useMemo<SearchableSelectGroup<string, AccessSelectOption>[]>(() => {
     const users = (directoryQuery.data?.users ?? [])
       .filter((entry) => entry.user && !grantedSubjectKeys.has(`user:${entry.user.id}`))

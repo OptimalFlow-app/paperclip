@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Globe, Lock, Users } from "lucide-react";
 import type { Issue, IssueVisibility } from "@paperclipai/shared";
 import {
@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { issuesApi } from "@/api/issues";
+import { projectsApi } from "@/api/projects";
 import { useToastActions } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
@@ -45,7 +46,7 @@ export function IssuePrivacyActions({
   implicitPrincipals = [],
   children,
 }: {
-  issue: Pick<Issue, "id" | "identifier" | "visibility">;
+  issue: Pick<Issue, "id" | "identifier" | "visibility"> & Partial<Pick<Issue, "privacyParentIssueId" | "projectId">>;
   companyId: string;
   canManage: boolean;
   closeMenu: () => void;
@@ -57,6 +58,38 @@ export function IssuePrivacyActions({
   const [shareOpen, setShareOpen] = useState(false);
   const [makePublicOpen, setMakePublicOpen] = useState(false);
   const isPrivate = issue.visibility === "private";
+  const checkScope = canManage && isPrivate;
+  const parentId = issue.privacyParentIssueId;
+  const parentQuery = useQuery({
+    queryKey: queryKeys.issues.detail(parentId ?? "__privacy-parent__"),
+    queryFn: () => issuesApi.get(parentId!),
+    enabled: checkScope && Boolean(parentId),
+  });
+  const projectQuery = useQuery({
+    queryKey: queryKeys.projects.detail(issue.projectId ?? "__privacy-project__"),
+    queryFn: () => projectsApi.get(issue.projectId!, companyId),
+    enabled: checkScope && Boolean(issue.projectId),
+  });
+  const parentProjectId = parentQuery.data?.projectId;
+  const parentProjectQuery = useQuery({
+    queryKey: queryKeys.projects.detail(parentProjectId ?? "__privacy-parent-project__"),
+    queryFn: () => projectsApi.get(parentProjectId!, companyId),
+    enabled: checkScope && Boolean(parentProjectId),
+  });
+  const scopeQueries = [
+    ...(parentId ? [parentQuery] : []),
+    ...(issue.projectId ? [projectQuery] : []),
+    ...(parentProjectId ? [parentProjectQuery] : []),
+  ];
+  const publicBlockedReason = scopeQueries.some(query => query.isError)
+    ? "Couldn't check inherited access. Retry before making this task public."
+    : scopeQueries.some(query => !query.data || query.isFetching)
+      ? "Checking inherited access…"
+      : parentQuery.data?.visibility === "private" || parentProjectQuery.data?.visibility === "private"
+        ? "Move this task out of its private parent before making it public."
+        : projectQuery.data?.visibility === "private" && !projectQuery.data.personalOwnerUserId
+          ? "Move this task out of its private project before making it public."
+          : null;
 
   const visibilityMutation = useMutation({
     mutationFn: (visibility: IssueVisibility) => issuesApi.setVisibility(issue.id, visibility),
@@ -79,14 +112,14 @@ export function IssuePrivacyActions({
     },
   });
 
-  function withTooltip(node: React.ReactNode) {
-    if (canManage) return node;
+  function withTooltip(node: React.ReactNode, blockedReason?: string | null) {
+    if (canManage && !blockedReason) return node;
     return (
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="block w-full">{node}</span>
+          <span className="block w-full" tabIndex={0}>{node}</span>
         </TooltipTrigger>
-        <TooltipContent className="max-w-xs text-xs">{NON_SETTER_TOOLTIP}</TooltipContent>
+        <TooltipContent className="max-w-xs text-xs">{canManage ? blockedReason : NON_SETTER_TOOLTIP}</TooltipContent>
       </Tooltip>
     );
   }
@@ -112,7 +145,7 @@ export function IssuePrivacyActions({
             <button
               type="button"
               className={cn(MENU_ITEM_CLASS, "text-destructive")}
-              disabled={!canManage}
+              disabled={!canManage || Boolean(publicBlockedReason)}
               onClick={() => {
                 closeMenu();
                 setMakePublicOpen(true);
@@ -120,7 +153,13 @@ export function IssuePrivacyActions({
             >
               <Globe className="h-4 w-4" aria-hidden="true" /> Make public
             </button>,
+            publicBlockedReason,
           )}
+          {canManage && scopeQueries.some(query => query.isError) ? (
+            <button type="button" className={MENU_ITEM_CLASS} onClick={() => {
+              for (const query of scopeQueries) if (query.isError) void query.refetch();
+            }}>Retry access check</button>
+          ) : null}
         </>
       ) : (
         withTooltip(
@@ -154,6 +193,8 @@ export function IssuePrivacyActions({
             <AlertDialogDescription>
               Everyone in the company will be able to read this task, its comments, documents, and
               run history. Existing private subtasks keep their privacy.{" "}
+              {projectQuery.data?.visibility === "private" && projectQuery.data.personalOwnerUserId
+                ? "This task will also leave your personal project. " : null}
               <span className="font-semibold text-foreground">Content already seen by others cannot be taken back.</span>
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -165,7 +206,7 @@ export function IssuePrivacyActions({
                 event.preventDefault();
                 visibilityMutation.mutate("open");
               }}
-              disabled={visibilityMutation.isPending}
+              disabled={visibilityMutation.isPending || Boolean(publicBlockedReason)}
             >
               {visibilityMutation.isPending ? "Making public…" : "Make public"}
             </AlertDialogAction>
