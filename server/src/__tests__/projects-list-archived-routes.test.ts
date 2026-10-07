@@ -51,7 +51,7 @@ describeEmbeddedPostgres("project list archived route defaults", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-projects-list-archived-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 120_000);
 
   afterEach(async () => {
     await db.delete(companyMemberships);
@@ -110,7 +110,7 @@ describeEmbeddedPostgres("project list archived route defaults", () => {
   });
 });
 
-describeEmbeddedPostgres.sequential("private project route visibility", () => {
+describeEmbeddedPostgres("private project route visibility", { concurrent: false }, () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const previousPrivacyMode = process.env.PAPERCLIP_ISSUE_PRIVACY_MODE;

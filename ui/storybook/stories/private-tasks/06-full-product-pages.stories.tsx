@@ -4,34 +4,38 @@ import { expect, userEvent, within, waitFor } from "storybook/test";
 import { Route, Routes, useNavigate } from "@/lib/router";
 import { Layout } from "@/components/Layout";
 import { IssueDetail } from "@/pages/IssueDetail";
+import { Projects } from "@/pages/Projects";
 import { DesignGuide } from "@/pages/DesignGuide";
 import { PluginLauncherProvider } from "@/plugins/launchers";
 import { mobile, privacyDecorator, privacyParameters } from "./PrivacyStory";
 
-function PrivacyPage({
+export function PrivacyPage({
   child = false,
   guide = false,
+  projects = false,
 }: {
   child?: boolean;
   guide?: boolean;
+  projects?: boolean;
 }) {
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
   useEffect(() => {
     navigate(
-      guide
+      projects ? "/PAP/projects" : guide
         ? "/PAP/design-guide"
         : `/PAP/issues/${child ? "PAP-411" : "PAP-410"}`,
       { replace: true },
     );
     setReady(true);
-  }, [navigate, child, guide]);
+  }, [navigate, child, guide, projects]);
   if (!ready) return null;
   return (
     <PluginLauncherProvider>
       <Routes>
         <Route path="/:companyPrefix" element={<Layout />}>
           <Route path="issues/:issueId" element={<IssueDetail />} />
+          <Route path="projects" element={<Projects />} />
           <Route path="design-guide" element={<DesignGuide />} />
         </Route>
       </Routes>
@@ -40,6 +44,7 @@ function PrivacyPage({
 }
 const meta = {
   title: "Private tasks/06 Full product pages",
+  excludeStories: ["PrivacyPage"],
   decorators: [privacyDecorator],
   parameters: { ...privacyParameters, waitForViewport: true },
   render: () => <PrivacyPage />,
@@ -165,3 +170,7 @@ export const ClassicSharedChild: Story = {
     ).not.toBeInTheDocument();
   },
 };
+
+export const PrivateProjectsInNavigation: Story = { parameters: { docs: { description: { story: "Route /PAP/projects. Private project locks sit on the right in the list and starred navigation." } } }, render: () => <PrivacyPage projects /> };
+export const ClassicPrivateProjects: Story = { parameters: { privacy: { classic: true } }, render: () => <PrivacyPage projects /> };
+export const MobilePrivateProjects: Story = { globals: mobile, render: () => <PrivacyPage projects /> };

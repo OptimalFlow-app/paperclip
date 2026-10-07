@@ -21,6 +21,12 @@ A Company is a first-order object. One Paperclip instance runs multiple Companie
 
 Every Company has a **Board** that governs high-impact decisions. The Board is the human oversight layer.
 
+Human invitations default to Operator, with company editing, invitations,
+connections, tools, environments, pipelines, and audit views available by
+default. Join approval and member-permission management remain separate grants.
+An inviter must hold these membership grants to invite a role that includes them.
+See [human Operator defaults](SPEC-implementation.md#91-board-auth).
+
 **V1: Single human Board.** One human operator.
 
 #### Board Approval Gates (V1)
@@ -37,7 +43,14 @@ outcome. See [the implementation contract](SPEC-implementation.md#124-connection
 Model authentication failures also surface a provider-specific Connections card
 on the task immediately after failure. Users can reconnect inline and resume;
 legacy agents keep their authentication until an explicit, validated adoption.
+Missing personal AI credentials found before a run starts use the same card.
+The responsible user connects their own account inside the task and continues.
 See [AI Connections](connections/AI-CONNECTIONS.md).
+
+AI connections also expose an on-demand, credential-scoped usage probe. It
+reports provider windows, scoped exhaustion, reset times and overage observations
+for downstream decisions, with explicit unknown/unsupported/error states.
+Probing does not change runner routing or enforce provider limits automatically.
 
 #### Board Powers (Always Available)
 
@@ -79,6 +92,15 @@ The Board sets Company-level budgets. The CEO can set budgets for Agents below t
 ## 2. Agent Model [DRAFT]
 
 Every employee is an agent. Agents are the workforce.
+
+### Cryptographic identity
+
+Agents have persistent Ed25519 identities, encrypted in their home instance.
+New agents receive keys during creation; existing agents receive them lazily on
+their next managed run. Agents can read their keys from the managed process
+environment, and authorized readers can view or copy the public key from the
+agent page. This does not grant external authorization or change bearer-token
+access. See [the implementation contract](AGENT-IDENTITY.md).
 
 ### Agent Identity (Adapter-Level)
 
@@ -285,7 +307,24 @@ All agent communication flows through the **task system**.
 - **Coordination** = commenting on tasks
 - **Status updates** = updating task status and fields
 
+Low-trust agents can create self-assigned tasks and subtasks within their
+permitted scope, subject to assignment permissions and the responsible user's
+authority. Created work retains containment. An authorized user's direct message
+in their own Agent Chat may authorize an agent to edit its own `AGENTS.md`;
+outside work and subtasks do not inherit this authority. Permission failures
+should name the rejected action and the specific restriction.
+
 There is no separate messaging or chat system. Tasks are the communication channel. This keeps all context attached to the work it relates to and creates a natural audit trail.
+
+Experimental Agent Chat presents one persistent task per person and agent as a simplified conversation. Chat has a searchable secondary sidebar with agent avatars that lists every eligible agent, conversations first; adding an agent starts or reopens their single conversation. It retains the task composer, transcript, tools, attachments, documents, and existing Subtasks panel, with ordinary company visibility. New execution tasks are ordinary project tasks, not children of the conversation. Idle conversations wait for a message without entering execution-task work queues. Agents clarify goals here and create assigned tasks for substantial execution. `/new` resets provider context at an ordered session boundary within the same task while preserving visible history. `enableAgentChat` is disabled by default; the V1 lifecycle and rollout contract is specified in `SPEC-implementation.md`.
+
+### Question recipients
+
+Ordinary Agent Chat questions use the server-owned conversation recipient.
+Task questions may optionally name a particular user or agent. Explicit user
+recipients must be valid and authorized in the company before a question is
+saved. See `SPEC-implementation.md` §9.8.1 for the resolver contract.
+
 
 Experimental Agent Chat presents one persistent task per person and agent as a simplified conversation. Chat has a searchable secondary sidebar with agent avatars; adding an agent starts or reopens their single conversation. It retains the task composer, transcript, tools, attachments, documents, and existing Subtasks panel, with the task's selected visibility. New execution tasks are ordinary project tasks, not structural children of the conversation; private-source restrictions still flow through their run provenance. Idle conversations wait for a message without entering execution-task work queues. Agents clarify goals here and create assigned tasks for substantial execution. `/new` resets provider context at an ordered session boundary within the same task while preserving visible history. `enableAgentChat` is disabled by default; the V1 lifecycle and rollout contract is specified in `SPEC-implementation.md`.
 
@@ -449,6 +488,10 @@ No separate "agent API" vs. "board API." Same endpoints, different authorization
 ### Work Artifacts
 
 Paperclip manages task-linked work artifacts: issue documents (rich-text plans, specs, notes attached to issues) and file attachments. Agents read and write these through the API as part of normal task execution. Full delivery infrastructure (code repos, deployments, production runtime) remains the agent's domain — Paperclip orchestrates the work, not the build pipeline.
+
+Users may start a task with only a prompt. Paperclip uses a short prompt slice as
+its initial title and asks the assigned agent to name the task early. Explicit
+user titles are preserved, and naming does not change task execution state.
 
 Task work mode is explicit persisted state. Requesting a plan in a title or description does not switch the task into planning mode. Standard execution may produce a plan as its requested deliverable; explicit planning mode separately governs plan-only execution and its approval transition.
 
@@ -650,3 +693,43 @@ omit the already-rejected export, clear stale repair notices, and finalize the
 accepted result without another provider turn, even when its old sandbox is
 unavailable. Preserve current ownership and newer-work fences. See
 `native-workspace-finalization-recovery.md`.
+
+### Git-backed skill library sources
+
+Repositories can supply read-only company skills independently of project repositories.
+A source tracks repository identity, branch, selected paths, and installed commits;
+an existing GitHub connection supplies caller-authorized reads. Manual refresh publishes
+complete local immutable versions, preserving skill identity and assignments. Selection
+operates on whole skill packages, with inspectable included files, declared runtime
+requirements, and advisory warnings for missing or external references. New
+upstream skills require reviewed selection; removed or deselected skills remain
+installed. Editing starts with an independent copy. Write-back and PR publication
+are a later milestone; exact path and commit provenance provide their base.
+
+## Public assistant connection (opt-in)
+
+The user-authorized MCP surface connects assistants to an explicitly selected
+company as the consenting person. It exposes first-party task reads, additive
+task creation and comments, durable documents and approval links. It reuses
+existing domain authorization and scheduling; OAuth does not grant agent
+identity, native run ownership, approval decisions or third-party credentials.
+See [Public MCP](public-mcp.md) for the implemented instance-side boundary,
+configuration, plugin packages and outstanding hosted release gates. The
+[delivery plan](plans/2026-09-30-paperclip-public-mcp-and-plugins.md) separates
+external agent participation and granted third-party tools into later releases.
+
+### Experimental connection routing
+
+A virtual AI connection can rotate new task/agent allocations through an
+authorized pool while preserving session affinity. Admission, credentials and
+durable recovery remain host responsibilities; policy can be supplied by an
+opt-in plugin. See [the experimental contract](connections/AI-CONNECTION-ROUTERS.md).
+
+## Internal agent commentary
+
+`agent_commentary` stores company-scoped, attributed complaints and suggestions
+as free-form text in the instance database. Legacy agents use the default
+`complain` and `suggestion-box` runtime skills; native runs use dedicated tools
+in standard, ask, and planning modes. Submission never changes task disposition
+or routes feedback externally. See [Agent commentary](agent-commentary.md) for
+authentication, replay, document-sized limits, inspection, and deletion semantics.

@@ -73,54 +73,15 @@ export const privacyParameters = {
 };
 export const mobile = { viewport: { value: "mobile", isRotated: false } };
 
-export function StoryFrame({
-  title,
-  story,
-  checks,
-  children,
-}: {
-  title: string;
-  story: string;
-  checks: string[];
-  children: ReactNode;
-}) {
-  return (
-    <main className="min-h-screen bg-background p-6 text-foreground">
-      <div className="mx-auto max-w-4xl space-y-6">
-        <header className="space-y-2">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Private tasks · Interactive product review
-          </p>
-          <h1 className="text-2xl font-semibold">{title}</h1>
-          <p className="max-w-2xl text-sm text-muted-foreground">{story}</p>
-        </header>
-        <section
-          aria-label="Production component"
-          className="rounded-lg border border-border bg-card p-4"
-        >
-          {children}
-        </section>
-        <aside className="space-y-2 text-sm text-muted-foreground">
-          <h2 className="font-medium text-foreground">What to review</h2>
-          <ul className="list-disc space-y-1 pl-5">
-            {checks.map((check) => (
-              <li key={check}>{check}</li>
-            ))}
-          </ul>
-          <p className="pt-2 text-xs">
-            Fictional company and in-memory API responses. Interactions reset on
-            story reload. These stories review the UX; server authorization is
-            covered by the feature's integration tests.
-          </p>
-        </aside>
-        <ToastViewport />
-      </div>
-    </main>
-  );
+export function StoryFrame({ children }: { title: string; story: string; checks: string[]; children: ReactNode }) {
+  return <main className="min-h-screen bg-background p-6 text-foreground"><div className="mx-auto max-w-4xl">{children}<ToastViewport /></div></main>;
 }
 
-/** Radix may focus/open the selector on mount. Explicitly open it when it
- * remains closed, without toggling an already-open selector back shut. */
+export async function choosePrivateTask(page: ReturnType<typeof within>) {
+  await userEvent.click(await page.findByRole("button", { name: "Add to composer" }));
+  await userEvent.click(await page.findByTestId("composer-add-private"));
+}
+
 export async function openProjectMemberPicker(canvasElement: HTMLElement) {
   const page = within(canvasElement.ownerDocument.body);
   const dialog = await page.findByRole("dialog", {

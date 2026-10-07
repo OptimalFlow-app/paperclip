@@ -130,7 +130,7 @@ are read from the database without a cross-request positive cache.
 
 ## Migration and current runtime integration
 
-Migration `0291_private_task_access.sql` adds the task/project ACL tables and
+Migration `0311_private_task_access.sql` adds the task/project ACL tables and
 backfills privacy parent edges with indexed keyset batches. Run binding is derived
 from native task identity, explicit issue identity, or legacy context. Missing
 source tasks remain issue-scoped tombstones. Context changes cannot turn those
@@ -138,7 +138,7 @@ runs into company-wide history. The migration is idempotent for preview installs
 existing explicit grants are preserved. Operators upgrading an unreleased preview
 should inspect root grants created under its former whole-tree sharing semantics.
 
-Migration `0292_private_task_draft_assets.sql` accompanies enforcement and binds
+Migration `0312_private_task_draft_assets.sql` accompanies enforcement and binds
 historical inline images to their first owned task. Unbound drafts remain
 uploader-only under the new asset-content guard.
 

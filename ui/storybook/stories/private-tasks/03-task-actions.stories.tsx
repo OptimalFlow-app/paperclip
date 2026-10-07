@@ -58,7 +58,7 @@ function PrivacyActionsStory() {
 const meta = {
   title: "Private tasks/03 Task actions",
   decorators: [privacyDecorator],
-  parameters: privacyParameters,
+  parameters: { ...privacyParameters, docs: { description: { component: "Task menu privacy actions, permission gates and disclosure confirmation." } } },
   render: () => <PrivacyActionsStory />,
 } satisfies Meta;
 export default meta;

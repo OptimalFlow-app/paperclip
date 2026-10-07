@@ -20,7 +20,9 @@ describe("private task production review", () => {
     process.env.PAPERCLIP_ISSUE_PRIVACY_MODE = "enforce";
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-private-review-");
     db = createDb(tempDb.connectionString);
-  }, 60000);
+    // Load the current route dependency graph during setup, outside assertion timeouts.
+    await Promise.all([import("../routes/issues.js"), import("../routes/projects.js")]);
+  }, 120_000);
   afterAll(async () => { await tempDb?.cleanup(); });
 
   async function fixture() {

@@ -1,5 +1,5 @@
 import type { Project } from "@paperclipai/shared";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, within, waitFor } from "storybook/test";
 import { ProjectProperties } from "@/components/ProjectProperties";
@@ -17,15 +17,19 @@ import {
 function ProjectStory({
   settings = false,
   open = false,
+  projectName = "Executive planning",
 }: {
   settings?: boolean;
   open?: boolean;
+  projectName?: string;
 }) {
   const state = usePrivacyStory();
   const [project, setProject] = useState<Project>(() => ({
     ...state.projects[0]!,
+    name: projectName,
     visibility: open ? ("open" as const) : ("private" as const),
   }));
+  useEffect(() => setProject(value => ({ ...value, name: projectName })), [projectName]);
   return (
     <StoryFrame
       title={
@@ -72,28 +76,30 @@ const openMembers = async (canvasElement: HTMLElement) => {
 const meta = {
   title: "Private tasks/05 Projects",
   decorators: [privacyDecorator],
-  parameters: privacyParameters,
-  render: () => <ProjectStory />,
+  parameters: { ...privacyParameters, docs: { description: { component: "Project settings → Manage access. Human and agent identities appear in the search dropdown and selected value. Owner, reader, error, loading and mobile states use production components." } } },
+  args: { projectName: "Executive planning" },
+  argTypes: { projectName: { control: "text" } },
+  render: (args) => <ProjectStory {...args} />,
 } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
 export const PrivateProjectSettings: Story = {
-  render: () => <ProjectStory settings />,
+  render: (args) => <ProjectStory {...args} settings />,
 };
 export const OpenProjectSettings: Story = {
-  render: () => <ProjectStory settings open />,
+  render: (args) => <ProjectStory {...args} settings open />,
 };
 export const PersonalProjectSettings: Story = {
   parameters: { privacy: { personal: true } },
-  render: () => <ProjectStory settings />,
+  render: (args) => <ProjectStory {...args} settings />,
 };
 export const ReaderProjectSettings: Story = {
   parameters: { privacy: { role: "reader" } },
-  render: () => <ProjectStory settings />,
+  render: (args) => <ProjectStory {...args} settings />,
 };
 export const AdminProjectSettings: Story = {
   parameters: { privacy: { role: "admin" } },
-  render: () => <ProjectStory settings />,
+  render: (args) => <ProjectStory {...args} settings />,
 };
 export const MemberList: Story = {
   play: async ({ canvasElement }) => {
@@ -168,7 +174,7 @@ export const AddFailure: Story = {
     const page = await openMembers(canvasElement);
     await openProjectMemberPicker(canvasElement);
     await userEvent.click(
-      await page.findByRole("option", { name: "Sam Rivera" }),
+      await page.findByRole("option", { name: /Sam Rivera/ }),
     );
     await userEvent.click(page.getByRole("button", { name: "Add" }));
     await waitFor(() =>
@@ -184,5 +190,5 @@ export const MobileMembers: Story = {
 };
 export const LightProjectSettings: Story = {
   globals: { theme: "light" },
-  render: () => <ProjectStory settings />,
+  render: (args) => <ProjectStory {...args} settings />,
 };

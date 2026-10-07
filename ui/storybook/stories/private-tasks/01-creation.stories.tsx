@@ -1,11 +1,12 @@
 import { useEffect, useRef } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, within, waitFor } from "storybook/test";
-import { NewIssueDialog } from "@/components/NewIssueDialog";
+import { PrivacyPage } from "./06-full-product-pages.stories";
 import { useDialog } from "@/context/DialogContext";
 import { Button } from "@/components/ui/button";
 import {
   mobile,
+  choosePrivateTask,
   privacyDecorator,
   privacyParameters,
   StoryFrame,
@@ -15,10 +16,12 @@ function Creation({
   parent = false,
   project = false,
   draft = false,
+  taskTitle = "Prepare my board briefing",
 }: {
   parent?: boolean;
   project?: boolean;
   draft?: boolean;
+  taskTitle?: string;
 }) {
   const { openNewIssue } = useDialog();
   const opened = useRef(false);
@@ -29,76 +32,69 @@ function Creation({
         : {
             title: parent
               ? "Research market benchmarks"
-              : "Prepare my board briefing",
+              : taskTitle,
           }),
       ...(parent
         ? {
             parentId: "privacy-root",
             parentIdentifier: "PAP-410",
-            parentTitle: "Prepare my board briefing",
+            parentTitle: taskTitle,
           }
         : {}),
       ...(project ? { projectId: "project-private" } : {}),
     });
   useEffect(() => {
-    if (!opened.current) {
-      opened.current = true;
-      open();
-    }
-  }, []);
-  return (
-    <StoryFrame
-      title={parent ? "Create a private subtask" : "Choose the task audience"}
-      story="As a CEO, I can mark a task private before saving. New children of a private task inherit its restrictions even when another agent does the work."
-      checks={[
-        "New company tasks start open. The Private task switch is an explicit choice.",
-        "A private parent's child starts private and the switch cannot be turned off.",
-        "Selecting a private project and restoring a saved private draft retain privacy.",
-      ]}
-    >
-      <Button onClick={open}>Create another task</Button>
-      <NewIssueDialog />
-    </StoryFrame>
-  );
+    open();
+  }, [parent, project, draft, taskTitle]);
+  return <PrivacyPage />;
 }
 const meta = {
   title: "Private tasks/01 Creation",
   decorators: [privacyDecorator],
-  parameters: privacyParameters,
-  render: () => <Creation />,
+  parameters: { ...privacyParameters, docs: { description: { component: "Route /PAP/issues with the new-task composer. Choose Private task from +; the lock chip keeps the selection visible. Parent and project restrictions remain inherited. Example title is editable in Controls." } } },
+  args: { taskTitle: "Prepare my board briefing" },
+  argTypes: { taskTitle: { control: "text" } },
+  render: (args) => <Creation {...args} />,
 } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
 export const OpenByDefault: Story = {
   play: async ({ canvasElement }) => {
-    await expect(
-      await within(canvasElement.ownerDocument.body).findByRole("switch", {
-        name: "Private task",
-      }),
-    ).not.toBeChecked();
+    const page = within(canvasElement.ownerDocument.body);
+    await page.findByRole("button", { name: "Add to composer" });
+    await waitFor(() => expect(page.queryByTestId("composer-private-chip")).not.toBeInTheDocument());
+  },
+};
+export const PrivacyInPlusMenu: Story = {
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("button", { name: "Add to composer" }));
+    await expect(await page.findByTestId("composer-add-private")).toBeVisible();
   },
 };
 export const PrivateBeforeSaving: Story = {
   play: async ({ canvasElement }) => {
-    const toggle = await within(canvasElement.ownerDocument.body).findByRole(
-      "switch",
-      { name: "Private task" },
-    );
-    await userEvent.click(toggle);
-    await expect(toggle).toBeChecked();
+    const page = within(canvasElement.ownerDocument.body);
+    await choosePrivateTask(page);
+    await expect(await page.findByRole("button", { name: "Remove private task" })).toBeVisible();
+  },
+};
+export const RemovePrivateChoice: Story = {
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await choosePrivateTask(page);
+    await userEvent.click(await page.findByRole("button", { name: "Remove private task" }));
+    await waitFor(() => expect(page.queryByTestId("composer-private-chip")).not.toBeInTheDocument());
   },
 };
 export const ChildInheritsPrivacy: Story = {
-  render: () => <Creation parent />,
+  render: (args) => <Creation {...args} parent />,
   play: async ({ canvasElement }) => {
-    const toggle = await within(canvasElement.ownerDocument.body).findByRole(
-      "switch",
-      { name: "Private task" },
-    );
-    await waitFor(() => expect(toggle).toBeChecked());
-    await expect(toggle).toBeDisabled();
+    await expect(await within(canvasElement.ownerDocument.body).findByRole("button", { name: "Private task" })).toBeDisabled();
   },
 };
+export const MobilePrivateChoice: Story = { ...PrivateBeforeSaving, globals: mobile };
+export const MobilePlusMenu: Story = { ...PrivacyInPlusMenu, globals: mobile };
 export const PrivateProject: Story = { render: () => <Creation project /> };
 export const PersonalProject: Story = {
   parameters: { privacy: { personal: true } },
@@ -114,7 +110,7 @@ export const CreationFailure: Story = {
   play: async ({ canvasElement }) => {
     const page = within(canvasElement.ownerDocument.body);
     await userEvent.click(
-      await page.findByRole("button", { name: "Create Task" }),
+      await page.findByRole("button", { name: "Create task" }),
     );
     await expect(
       await page.findByText("The request could not be completed. Try again."),

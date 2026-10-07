@@ -71,7 +71,7 @@ function Sharing({
 const meta = {
   title: "Private tasks/02 Sharing",
   decorators: [privacyDecorator],
-  parameters: privacyParameters,
+  parameters: { ...privacyParameters, docs: { description: { component: "Task menu → Share → Add someone. Inspect avatars in search and selected values, inherited grants, reader access, confirmations, empty/loading/error states and mobile. The sticky-access paragraph is removed." } } },
   render: () => <Sharing />,
 } satisfies Meta;
 export default meta;
@@ -196,3 +196,16 @@ export const LongNamesMobile: Story = {
 };
 export const MobileSharing: Story = { globals: mobile };
 export const LightSharing: Story = { globals: { theme: "light" } };
+
+export const SearchPeopleAndAgents: Story = {
+  render: () => <Sharing add="choose" />,
+  parameters: { privacy: { grants: "empty" }, docs: { description: { story: "Task sharing search: human avatar or initials and agent character avatars stay visible in results and after selection." } } },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const dialog = await page.findByRole("dialog", { name: "Who can access this task" });
+    const trigger = within(dialog).getByRole("combobox");
+    if (trigger.getAttribute("aria-expanded") !== "true") await userEvent.click(trigger);
+    await expect(await page.findByRole("option", { name: "Executive assistant" })).toBeVisible();
+  },
+};
+export const MobileSearchPeopleAndAgents: Story = { ...SearchPeopleAndAgents, globals: mobile };

@@ -1,6 +1,10 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 const surfaces = [
+  ["ComposerAddMenu · ComposerPrivacyChip · TaskChatComposer", "Changed", "01 Creation", "privacy-in-plus-menu", "Private task under +, selected lock chip, removal, inherited parent/project restrictions, desktop and mobile."],
+  ["AccessSelectIdentity", "Added", "02 Sharing", "search-people-and-agents", "Shared rendering of human pictures or initials and agent character avatars in task and project sharing results and selected values."],
+  ["SidebarProjects · SidebarStarredProjects · production variant · Projects", "Changed", "06 Full product pages", "private-projects-in-navigation", "Right-side locks in actual navigation and project rows, current and classic shells, mobile."],
+
   [
     "NewIssueDialog",
     "Changed",
@@ -13,7 +17,7 @@ const surfaces = [
     "Added",
     "02 Sharing",
     "all-access-sources",
-    "All four grant sources; implicit roles; read-only; inherited; sticky assignment; add/revoke; confirmations; agent cautions; loading/error/retry; long names; mobile/light.",
+    "All four grant sources; implicit roles; read-only; inherited; retained assignment grants; add/revoke; confirmations; agent cautions; loading/error/retry; long names; mobile/light.",
   ],
   [
     "IssuePrivacyActions",
@@ -152,8 +156,8 @@ function Overview() {
             Every changed surface, in context
           </h1>
           <p className="text-sm text-muted-foreground">
-            This review covers all 14 rendered components and pages changed by
-            the private-task feature: four additions and ten existing surfaces.
+            This review covers all changed components and pages changed by
+            the private-task feature.
             Each canvas uses the production component with fictional, isolated
             API fixtures.
           </p>

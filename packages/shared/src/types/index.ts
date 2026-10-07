@@ -280,6 +280,7 @@ export type {
   AgentDetail,
   ClearAgentErrorResponse,
   AgentPermissions,
+  AgentPublicIdentity,
   AgentRuntimeConfig,
   AgentInstructionsBundleMode,
   AgentInstructionsFileSummary,
@@ -357,6 +358,8 @@ export type {
   ProjectRepositoryOptions,
   ProjectAccessMember,
   ProjectAccessSubjectType,
+  ProjectDiscoverySummary,
+  ProjectDiscoveryPage,
   ProjectBudgetSummary,
   ProjectCodebase,
   ProjectCodebaseOrigin,
@@ -1092,3 +1095,5 @@ export * from "./email.js";
 export type { AgentInstructionErrorCode, AgentInstructionErrorDetails, AgentInstructionSource, AgentInstructionRevision, AgentInstructionSnapshot, AgentInstructionCommitReceipt, AgentInstructionHistory, AgentInstructionDiff } from "./agent.js";
 
 export type { AgentInstructionCandidate } from "./agent.js";
+
+export * from "./skill-source.js";

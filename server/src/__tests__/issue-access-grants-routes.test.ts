@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   activityLog,
   agents,
+  agentWakeupRequests,
   authUsers,
   companies,
   companyMemberships,
@@ -62,7 +63,7 @@ async function createApp(db: Db, actor: Express.Request["actor"]) {
   return app;
 }
 
-describeEmbeddedPostgres.sequential("issue access grant and locked edge routes", () => {
+describeEmbeddedPostgres("issue access grant and locked edge routes", { concurrent: false }, () => {
   let db!: Db;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const previousPrivacyMode = process.env.PAPERCLIP_ISSUE_PRIVACY_MODE;
@@ -71,7 +72,9 @@ describeEmbeddedPostgres.sequential("issue access grant and locked edge routes",
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-access-grants-");
     db = createDb(tempDb.connectionString);
     process.env.PAPERCLIP_ISSUE_PRIVACY_MODE = "enforce";
-  }, 20_000);
+    // Load the current route dependency graph during setup, outside assertion timeouts.
+    await Promise.all([import("../routes/issues.js"), import("../routes/projects.js")]);
+  }, 120_000);
 
   afterEach(async () => {
     await db.delete(issueReferenceMentions);
@@ -83,6 +86,7 @@ describeEmbeddedPostgres.sequential("issue access grant and locked edge routes",
     await db.delete(issues);
     await db.delete(projectAccessMembers);
     await db.delete(projects);
+    await db.delete(agentWakeupRequests);
     await db.delete(agents);
     await db.delete(companyMemberships);
     await db.delete(authUsers);

@@ -10,6 +10,7 @@ import { RemovablePrivateBlocker } from "./04-references-and-blockers.stories";
 import projects from "./05-projects.stories";
 import {
   openProjectMemberPicker,
+  choosePrivateTask,
   privacyDecorator,
   privacyParameters,
 } from "./PrivacyStory";
@@ -29,17 +30,14 @@ export const CeoCreatesPrivateTask: Story = {
   play: async ({ canvasElement, step }) => {
     const page = within(canvasElement.ownerDocument.body);
     await step("Choose privacy before saving", async () => {
-      const toggle = await page.findByRole("switch", { name: "Private task" });
-      await userEvent.click(toggle);
-      await expect(toggle).toBeChecked();
+      await choosePrivateTask(page);
+      await expect(await page.findByRole("button", { name: "Remove private task" })).toBeVisible();
     });
     await step("Create the private briefing", async () => {
-      await userEvent.click(page.getByRole("button", { name: "Create Task" }));
+      await userEvent.click(page.getByRole("button", { name: "Create task" }));
+      await waitFor(() => expect(page.getByText("Created PAP-414")).toBeVisible());
       await expect(
-        await page.findByRole("button", { name: "Create another task" }),
-      ).toBeVisible();
-      await expect(
-        page.queryByRole("switch", { name: "Private task" }),
+        page.queryByTestId("composer-private-chip"),
       ).not.toBeInTheDocument();
     });
   },
@@ -50,10 +48,10 @@ export const CeoSharesOnlyChild: Story = {
   parameters: { privacy: { grants: "empty" } },
   play: async ({ canvasElement, step }) => {
     const page = within(canvasElement.ownerDocument.body);
-    await step("Review the selected person and sticky access", async () => {
+    await step("Review the selected person", async () => {
       await expect(
         await page.findByRole("dialog", { name: "Who can access this task" }),
-      ).toHaveTextContent("Access is sticky");
+      ).toHaveTextContent("Morgan Reed");
     });
     await step("Share the research child with Morgan", async () => {
       await userEvent.keyboard("{Escape}");
@@ -176,7 +174,7 @@ export const OwnerAddsProjectMember: Story = {
       );
       await openProjectMemberPicker(canvasElement);
       await userEvent.click(
-        await page.findByRole("option", { name: "Sam Rivera" }),
+        await page.findByRole("option", { name: /Sam Rivera/ }),
       );
     });
     await step("Grant access to the project", async () => {

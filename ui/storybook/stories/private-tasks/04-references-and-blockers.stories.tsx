@@ -112,7 +112,7 @@ function References({
 const meta = {
   title: "Private tasks/04 References and blockers",
   decorators: [privacyDecorator],
-  parameters: privacyParameters,
+  parameters: { ...privacyParameters, docs: { description: { component: "Task references, parent navigation and blockers redact unreadable task content. Inspect all existing reference variants and mobile." } } },
   render: () => <References />,
 } satisfies Meta;
 export default meta;

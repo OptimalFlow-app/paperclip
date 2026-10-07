@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   unique,
   bigint,
+  boolean,
   check,
 } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
@@ -41,6 +42,7 @@ export const issues = pgTable(
     privacyRootIssueId: uuid("privacy_root_issue_id").references((): AnyPgColumn => issues.id),
     privacyParentIssueId: uuid("privacy_parent_issue_id").references((): AnyPgColumn => issues.id, { onDelete: "set null" }),
     title: text("title").notNull(),
+    titleNeedsGeneration: boolean("title_needs_generation").notNull().default(false),
     description: text("description"),
     status: text("status").notNull().default("backlog"),
     statusVersion: bigint("status_version", { mode: "number" }).notNull().default(0),

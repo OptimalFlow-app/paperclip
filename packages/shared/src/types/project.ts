@@ -88,6 +88,19 @@ export interface ProjectManagedByPlugin {
   updatedAt: Date;
 }
 
+export interface ProjectDiscoverySummary {
+  id: string;
+  name: string;
+  status: string;
+  description: string | null;
+  descriptionTruncated: boolean;
+}
+
+export interface ProjectDiscoveryPage {
+  projects: ProjectDiscoverySummary[];
+  nextCursor: string | null;
+}
+
 export interface Project {
   id: string;
   companyId: string;
@@ -139,9 +152,11 @@ export interface ProjectRepository {
   url: string;
   private?: boolean;
   connections: string[];
+  connectionIds?: string[];
 }
 
 export interface ProjectRepositoryOptions {
+  connections?: Array<{ id: string; name: string }>;
   repositories: ProjectRepository[];
   connectionCount: number;
   failedConnectionCount: number;

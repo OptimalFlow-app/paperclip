@@ -28,7 +28,7 @@ import { agentRoutes } from "../routes/agents.js";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
-describeEmbeddedPostgres.sequential("heartbeat run privacy routes", () => {
+describeEmbeddedPostgres("heartbeat run privacy routes", { concurrent: false }, () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   const previousPrivacyMode = process.env.PAPERCLIP_ISSUE_PRIVACY_MODE;
@@ -37,7 +37,7 @@ describeEmbeddedPostgres.sequential("heartbeat run privacy routes", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-run-privacy-routes-");
     db = createDb(tempDb.connectionString);
     process.env.PAPERCLIP_ISSUE_PRIVACY_MODE = "enforce";
-  }, 20_000);
+  }, 120_000);
 
   afterEach(async () => {
     await db.delete(activityLog);

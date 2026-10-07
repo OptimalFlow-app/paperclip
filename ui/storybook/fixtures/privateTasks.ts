@@ -380,6 +380,7 @@ export function installPrivacyApi(state: PrivacyState) {
     const data = typeof init?.body === "string" ? JSON.parse(init.body) : {};
     const json = (value: unknown) => Response.json(value);
     if (!path.startsWith("/api/")) return previous(input, init);
+    if (path.includes("/email/tasks/")) return json({ messages: [], publications: [] });
     if (path === "/api/auth/get-session") return json(state.session);
     if (path === "/api/cli-auth/me") return json(state.access);
     if (path === "/api/companies") return json(storybookCompanies);
@@ -406,7 +407,7 @@ export function installPrivacyApi(state: PrivacyState) {
       return json({
         projectMemberships: {},
         agentMemberships: {},
-        starredProjectIds: [],
+        starredProjectIds: ["project-private"],
         starredAgentIds: [],
         starredDocumentIds: [],
         projectStarredAt: {},

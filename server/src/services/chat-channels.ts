@@ -8668,7 +8668,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
             );
           return true;
         }
-        validateNativeQuestionResponseInput(interaction, { answers });
+        await validateNativeQuestionResponseInput(interaction, { answers });
         // Canonical service rechecks required fields, options, audience, and
         // pending -> answered atomically with the response-delivery receipt.
         const issue = await db

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { IssueWorkMode } from "@paperclipai/shared";
-import { Check, ClipboardList, MessageCircleQuestion, Paperclip, Plus, Target, X, type LucideIcon } from "lucide-react";
+import { Check, ClipboardList, MessageCircleQuestion, Lock, Paperclip, Plus, Target, X, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { workModeMetaFor } from "@/lib/work-mode-meta";
 import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -20,6 +20,7 @@ interface ComposerAddMenuProps {
   onAttachFile?: () => void;
   attachDisabled?: boolean;
   onGoal?: () => void;
+  privacy?: { private: boolean; inherited?: string; onChange: (value: boolean) => void };
   disabled?: boolean;
   mobile?: boolean;
   triggerTestId?: string;
@@ -27,7 +28,7 @@ interface ComposerAddMenuProps {
 }
 
 export function ComposerAddMenu({
-  mode, onModeChange, onAttachFile, attachDisabled, onGoal, disabled, mobile: mobileProp, triggerTestId, menuTestId,
+  mode, onModeChange, onAttachFile, attachDisabled, onGoal, privacy, disabled, mobile: mobileProp, triggerTestId, menuTestId,
 }: ComposerAddMenuProps) {
   const [open, setOpen] = useState(false);
   const goalFocusRef = useRef(false);
@@ -40,9 +41,10 @@ export function ComposerAddMenu({
     return () => query.removeEventListener("change", update);
   }, []);
   const mobile = mobileProp ?? narrow;
-  if (!onModeChange && !onAttachFile && !onGoal) return null;
+  if (!onModeChange && !onAttachFile && !onGoal && !privacy) return null;
   const actions: Array<{ id: string; label: string; detail?: string; Icon: LucideIcon; select: () => void; disabled?: boolean; selected?: boolean }> = [
     ...(onAttachFile ? [{ id: "composer-add-file", label: "Files and images", Icon: Paperclip, select: onAttachFile, disabled: attachDisabled }] : []),
+    ...(privacy ? [{ id: "composer-add-private", label: "Private task", detail: privacy.inherited, Icon: Lock, select: () => privacy.onChange(!privacy.private), selected: privacy.private, disabled: Boolean(privacy.inherited) }] : []),
     ...(onGoal ? [{ id: "composer-add-goal", label: "Goal", detail: "Keep pursuing", Icon: Target, select: onGoal }] : []),
     ...(onModeChange ? [
       { id: "composer-add-plan", label: "Plan mode", detail: "Plan before acting", Icon: ClipboardList, select: () => onModeChange(mode === "planning" ? "standard" : "planning"), selected: mode === "planning" },
@@ -105,5 +107,16 @@ export function ComposerModeChip({ mode, onRemove, disabled, testId, mobile = fa
     <Icon className="size-3.5" aria-hidden />
     <span className={mobile ? "sr-only" : "max-sm:sr-only"}>{meta.label}</span>
     <X className="size-3.5" aria-hidden />
+  </button>;
+}
+
+export function ComposerPrivacyChip({ inherited, onRemove, disabled }: { inherited?: string; onRemove: () => void; disabled?: boolean }) {
+  return <button type="button" onClick={onRemove} aria-label={inherited ? "Private task" : "Remove private task"}
+    title={inherited ?? "Only you and people you share with can read this task"}
+    disabled={disabled || Boolean(inherited)} data-testid="composer-private-chip"
+    className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-border bg-muted px-2 text-xs font-medium text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+    <Lock className="size-3.5" aria-hidden />
+    <span className="max-sm:sr-only">Private</span>
+    {!inherited ? <X className="size-3.5" aria-hidden /> : null}
   </button>;
 }

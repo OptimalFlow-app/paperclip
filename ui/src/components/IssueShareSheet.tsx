@@ -1,3 +1,6 @@
+import { AgentAvatar } from "./AgentAvatar";
+import { Identity } from "./Identity";
+import { renderAccessIdentity, type AccessSelectOption } from "./AccessSelectIdentity";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -236,7 +239,7 @@ export function IssueShareSheet({
 
   // Candidate subjects for the "Add someone" combobox, minus anyone who already
   // holds an active grant. Value encodes both type and id: `type:id`.
-  const addGroups = useMemo<SearchableSelectGroup[]>(() => {
+  const addGroups = useMemo<SearchableSelectGroup<string, AccessSelectOption>[]>(() => {
     const users = (directoryQuery.data?.users ?? [])
       .filter((entry) => entry.user && !grantedSubjectKeys.has(`user:${entry.user.id}`))
       .map((entry) => ({
@@ -244,6 +247,7 @@ export function IssueShareSheet({
         value: `user:${entry.user!.id}`,
         label: entry.user!.name ?? entry.user!.email ?? "Unknown user",
         searchText: [entry.user!.name, entry.user!.email].filter(Boolean).join(" "),
+        identity: <Identity name={entry.user!.name ?? entry.user!.email ?? "Unknown user"} avatarUrl={entry.user!.image} size="sm" />,
       }));
     const agents = (agentsQuery.data ?? [])
       .filter((agent) => !grantedSubjectKeys.has(`agent:${agent.id}`))
@@ -252,8 +256,9 @@ export function IssueShareSheet({
         value: `agent:${agent.id}`,
         label: agent.name,
         searchText: agent.name,
+        identity: <><AgentAvatar agent={agent} size={24} /><span className="truncate">{agent.name}</span></>,
       }));
-    const groups: SearchableSelectGroup[] = [];
+    const groups: SearchableSelectGroup<string, AccessSelectOption>[] = [];
     if (users.length > 0) groups.push({ id: "people", label: "People", options: users });
     if (agents.length > 0) groups.push({ id: "agents", label: "Agents", options: agents });
     return groups;
@@ -413,6 +418,8 @@ export function IssueShareSheet({
             <SearchableSelect
               value={addSelection}
               groups={addGroups}
+              renderValue={(option) => option ? renderAccessIdentity(option) : "Choose a person or agent…"}
+              renderOption={renderAccessIdentity}
               onValueChange={(value) => setAddSelection(value)}
               placeholder="Choose a person or agent…"
               searchPlaceholder="Search people and agents…"
@@ -438,15 +445,7 @@ export function IssueShareSheet({
               </div>
             ) : null}
 
-            <div className="flex items-start gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              <span>
-                <span className="font-medium text-foreground">Access is sticky.</span> It lasts until
-                you revoke it — unassignment or completion won't remove it.
-              </span>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-1">
+            <div className="flex items-center justify-between gap-2 pt-1">
               <Button
                 variant="ghost"
                 size="sm"

@@ -1,3 +1,6 @@
+import { AgentAvatar } from "./AgentAvatar";
+import { Identity } from "./Identity";
+import { renderAccessIdentity, type AccessSelectOption } from "./AccessSelectIdentity";
 import { agentVisibilityFromPermissions, isSharedAgentVisibility } from "@/lib/issuePrivacy";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -37,7 +40,7 @@ export function ProjectAccessMembers({ project, canManage }: { project: Project;
     () => new Set((membersQuery.data ?? []).map((member) => `${member.subjectType}:${member.subjectId}`)),
     [membersQuery.data],
   );
-  const groups = useMemo<SearchableSelectGroup[]>(() => {
+  const groups = useMemo<SearchableSelectGroup<string, AccessSelectOption>[]>(() => {
     const people = (directoryQuery.data?.users ?? [])
       .filter((entry) => entry.user && !activeKeys.has(`user:${entry.user.id}`))
       .map((entry) => ({
@@ -45,10 +48,11 @@ export function ProjectAccessMembers({ project, canManage }: { project: Project;
         value: `user:${entry.user!.id}`,
         label: entry.user!.name ?? entry.user!.email ?? "Unknown user",
         searchText: entry.user!.email ?? "",
+        identity: <Identity name={entry.user!.name ?? entry.user!.email ?? "Unknown user"} avatarUrl={entry.user!.image} size="sm" />,
       }));
     const agentOptions = (agentsQuery.data ?? [])
       .filter((agent) => !activeKeys.has(`agent:${agent.id}`))
-      .map((agent) => ({ key: `agent:${agent.id}`, value: `agent:${agent.id}`, label: agent.name }));
+      .map((agent) => ({ key: `agent:${agent.id}`, value: `agent:${agent.id}`, label: agent.name, identity: <><AgentAvatar agent={agent} size={24} /><span className="truncate">{agent.name}</span></> }));
     return [
       ...(people.length ? [{ id: "people", label: "People", options: people }] : []),
       ...(agentOptions.length ? [{ id: "agents", label: "Agents", options: agentOptions }] : []),
@@ -100,6 +104,8 @@ export function ProjectAccessMembers({ project, canManage }: { project: Project;
               <SearchableSelect
                 value={selection}
                 groups={groups}
+                renderValue={(option) => option ? renderAccessIdentity(option) : "Add a person or agent"}
+                renderOption={renderAccessIdentity}
                 onValueChange={(value) => setSelection(value)}
                 placeholder="Add a person or agent"
                 searchPlaceholder="Search people and agents"
