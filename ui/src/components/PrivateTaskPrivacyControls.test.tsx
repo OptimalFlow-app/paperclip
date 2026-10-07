@@ -55,6 +55,20 @@ describe("inherited privacy controls", () => {
     await client.invalidateQueries({ queryKey: queryKeys.issues.privacyConstraints("child") }); await settle();
     expect(publicButton().disabled).toBe(false);
   });
+  it.each([
+    ["parent", { privacyParentIssueId: "private-parent" }],
+    ["project", { projectId: "private-project" }],
+  ] as const)("refreshes task privacy after moving out of a private %s", async (kind, scope) => {
+    api.constraints.mockResolvedValue({ publicBlockedBy: kind, leavesPersonalProject: false });
+    actions(scope); await settle();
+    expect(publicButton().disabled).toBe(true);
+    expect(api.constraints).toHaveBeenCalledTimes(1);
+    api.constraints.mockResolvedValue({ publicBlockedBy: null, leavesPersonalProject: false });
+    // Same task ID and mounted action menu: only the surrounding scope changes.
+    actions(); await settle();
+    expect(api.constraints).toHaveBeenCalledTimes(2);
+    expect(publicButton().disabled).toBe(false);
+  });
   it("checks a parent's private project even when the parent itself is open", async () => {
     api.constraints.mockResolvedValue({ publicBlockedBy: "parent", leavesPersonalProject: false });
     actions({ privacyParentIssueId: "parent" }); await settle(); expect(publicButton().disabled).toBe(true);

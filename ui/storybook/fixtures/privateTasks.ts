@@ -498,6 +498,18 @@ export function installPrivacyApi(state: PrivacyState) {
           const error = fail("visibility");
           if (error) return error;
           Object.assign(item, data);
+          if (data.parentId !== undefined) {
+            const parent = state.tasks.find(task => task.id === data.parentId);
+            item.privacyParentIssueId = parent?.id ?? null;
+            item.privacyRootIssueId = parent?.visibility === "private" ? parent.privacyRootIssueId ?? parent.id : item.id;
+            item.ancestors = parent ? [{ ...parent,
+              project: parent.project ? { ...parent.project, workspaces: parent.project.workspaces ?? [], primaryWorkspace: parent.project.primaryWorkspace ?? null } : null,
+              goal: parent.goal ?? null,
+            }] : [];
+          }
+          if (data.projectId !== undefined) {
+            item.project = state.projects.find(project => project.id === data.projectId) ?? null;
+          }
           state.operations.push("Task audience: " + item.visibility);
         }
         return json(item);

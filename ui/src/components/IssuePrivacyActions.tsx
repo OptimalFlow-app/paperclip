@@ -32,7 +32,7 @@ const NON_SETTER_TOOLTIP =
  * opens a dialog is clicked.
  *
  * Setter rules (locked decision, server-gated via
- * `resolveIssuePrivacyManagementRoot`): only the responsible user + admins can
+ * `resolveManagedIssueForPrivacy`): only the responsible user + admins can
  * change visibility or grants. Non-setters see the items disabled with a
  * tooltip. Make-**public** always confirms (one-way disclosure); make-private
  * never does.
@@ -58,7 +58,7 @@ export function IssuePrivacyActions({
   const [makePublicOpen, setMakePublicOpen] = useState(false);
   const isPrivate = issue.visibility === "private";
   const constraintsQuery = useQuery({
-    queryKey: queryKeys.issues.privacyConstraints(issue.id),
+    queryKey: [...queryKeys.issues.privacyConstraints(issue.id), issue.privacyParentIssueId ?? null, issue.projectId ?? null],
     queryFn: () => issuesApi.privacyConstraints(issue.id),
     enabled: canManage && isPrivate,
   });

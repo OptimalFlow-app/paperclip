@@ -214,3 +214,33 @@ export const ProjectVisibilityAutosaveCompletes: Story = {
   },
 };
 export const MobileProjectVisibilityThroughAutosave: Story = { ...ProjectVisibilityThroughAutosave, globals: mobile };
+
+export const OwnerMovesOutOfPrivateParent: Story = {
+  render: () => <PrivacyPage child />,
+  parameters: { docs: { description: { story: "The owner removes a private parent through the production properties picker, then reviews Make public on the same task. Privacy hints refresh without reloading the page." } } },
+  play: async ({ canvasElement }) => {
+    const page = await openTaskMenu(canvasElement);
+    await expect(page.getByRole("button", { name: "Make public" })).toBeDisabled();
+    await userEvent.click(page.getByRole("button", { name: "More task actions" }));
+    await userEvent.click(await page.findByRole("button", { name: "Edit parent" }));
+    await userEvent.click(await page.findByRole("button", { name: "No parent" }));
+    await openTaskMenu(canvasElement);
+    await waitFor(() => expect(page.getByRole("button", { name: "Make public" })).toBeEnabled());
+    await userEvent.click(page.getByRole("button", { name: "Make public" }));
+    await expect(await page.findByRole("alertdialog")).toHaveTextContent("Existing private subtasks keep their privacy");
+  },
+};
+export const OwnerMovesOutOfPrivateProject: Story = {
+  parameters: { privacy: { taskProject: true }, docs: { description: { story: "The owner removes the private project through the production properties picker. The task keeps its private visibility, and Make public becomes available without a page reload." } } },
+  play: async ({ canvasElement }) => {
+    const page = await openTaskMenu(canvasElement);
+    await expect(page.getByRole("button", { name: "Make public" })).toBeDisabled();
+    await userEvent.click(page.getByRole("button", { name: "More task actions" }));
+    await userEvent.click(await page.findByRole("button", { name: "Executive planning" }));
+    await userEvent.click(await page.findByRole("button", { name: "No project" }));
+    await openTaskMenu(canvasElement);
+    await waitFor(() => expect(page.getByRole("button", { name: "Make public" })).toBeEnabled());
+    await userEvent.click(page.getByRole("button", { name: "Make public" }));
+    await expect(await page.findByRole("alertdialog")).toHaveTextContent("Make this task public?");
+  },
+};

@@ -1,3 +1,4 @@
+import { OwnerMovesOutOfPrivateParent, OwnerMovesOutOfPrivateProject } from "./06-full-product-pages.stories";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, within, waitFor } from "storybook/test";
 import creation from "./01-creation.stories";
@@ -193,3 +194,12 @@ export const OwnerAddsProjectMember: Story = {
 export const OwnerKeepsChildAccessIndependent: Story = { ...AddDirectGrantAlongsideInheritedAccess, name: "Owner · Add a child grant before removing parent access" };
 export const OwnerRemovesProjectOnlyTaskAccess: Story = { ...MembershipUpdatesTaskAudience, name: "Project owner · Remove a member and check the task audience" };
 export const OwnerOpensProjectWithPrivateTasks: Story = { ...OpenProjectAudienceCopy, name: "Project owner · Review access loss before opening the project" };
+
+export const OwnerMovesChildThenReviewsPublishing: Story = {
+  ...OwnerMovesOutOfPrivateParent,
+  name: "Owner · Move out of a private parent and review publishing",
+};
+export const OwnerMovesTaskThenReviewsPublishing: Story = {
+  ...OwnerMovesOutOfPrivateProject,
+  name: "Owner · Move out of a private project and review publishing",
+};

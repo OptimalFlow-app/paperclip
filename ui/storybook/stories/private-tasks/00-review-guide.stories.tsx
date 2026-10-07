@@ -108,6 +108,11 @@ function storyLink(group: string, story: string) {
   return `./?path=/story/private-tasks-${group.toLowerCase().replaceAll(" ", "-")}--${story}`;
 }
 const journeys = [
+  ["Owner · Keep child access independent", "owner-keeps-child-access-independent", "Add a direct child grant before removing an inherited source of access."],
+  ["Project owner · Remove a member", "owner-removes-project-only-task-access", "Remove project-only task access and inspect the refreshed task audience."],
+  ["Project owner · Open the project", "owner-opens-project-with-private-tasks", "Review the loss of project-only access before opening the project."],
+  ["Owner · Move out of a private parent", "owner-moves-child-then-reviews-publishing", "Use the actual task properties picker, then review publishing without reloading."],
+  ["Owner · Move out of a private project", "owner-moves-task-then-reviews-publishing", "Remove a private project through the actual task page and see publishing become available."],
   [
     "CEO · Create a private task",
     "ceo-creates-private-task",
@@ -170,7 +175,7 @@ function Overview() {
         <section className="space-y-3">
           <h2 className="text-xl font-semibold">Start with the user stories</h2>
           <p className="text-sm text-muted-foreground">
-            These seven journeys run their interactions automatically and leave
+            These {journeys.length} journeys run their interactions automatically and leave
             the resulting screen visible. Use the Storybook interactions panel
             to inspect each named step, or reload a component story to explore
             manually.
@@ -230,7 +235,7 @@ function Overview() {
           </h2>
           <ol className="list-decimal space-y-2 pl-5">
             <li>
-              Walk the seven user stories, then use the inventory to inspect
+              Walk the {journeys.length} user stories, then use the inventory to inspect
               every component's individual states.
             </li>
             <li>
