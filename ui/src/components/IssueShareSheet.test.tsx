@@ -41,6 +41,7 @@ vi.mock("@/context/ToastContext", () => ({
 }));
 
 import { IssueShareSheet } from "./IssueShareSheet";
+import { queryKeys } from "@/lib/queryKeys";
 
 function grant(overrides: Partial<IssueAccessGrant>): IssueAccessGrant {
   return {
@@ -98,6 +99,7 @@ describe("IssueShareSheet", () => {
 
   async function renderSheet(canManage = true, implicitPrincipals: import("./IssueShareSheet").ShareSheetImplicitPrincipal[] = []) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(queryKeys.issues.accessGrants("descendant"), []);
     root = createRoot(container);
     act(() => {
       root!.render(
@@ -114,6 +116,7 @@ describe("IssueShareSheet", () => {
       );
     });
     await settle();
+    return client;
   }
 
   it("renders a source badge per grant and gates Revoke by source", async () => {
@@ -140,7 +143,7 @@ describe("IssueShareSheet", () => {
 
   it("removes a saved grant while explaining that assignment access remains", async () => {
     listAccessGrants.mockResolvedValue([grant({ id: "g1", source: "assignment", subjectType: "agent", subjectId: "a1" })]);
-    await renderSheet(true, [{ id: "agent:a1", displayName: "Helper", roleLabel: "Current assignee" }]);
+    const client = await renderSheet(true, [{ id: "agent:a1", displayName: "Helper", roleLabel: "Current assignee" }]);
     expect([...document.body.querySelectorAll("button")].filter(button => button.textContent?.trim() === "Revoke")).toHaveLength(0);
     expect(document.body.textContent).toContain("access remains while this role applies");
     const removeSaved = [...document.body.querySelectorAll("button")].find(button => button.textContent?.trim() === "Remove saved grant");
@@ -153,6 +156,7 @@ describe("IssueShareSheet", () => {
     act(() => confirm!.click());
     await settle();
     expect(revokeAccessGrant).toHaveBeenCalledWith("i1", "g1");
+    expect(client.getQueryState(queryKeys.issues.accessGrants("descendant"))?.isInvalidated).toBe(true);
   });
 
   it.each([
@@ -163,7 +167,7 @@ describe("IssueShareSheet", () => {
     listAccessGrants.mockResolvedValue([grant({ id: "broader", ...access })]);
     listUserDirectory.mockResolvedValue({ users: [{ user: { id: "u1", name: "Ada", email: "ada@example.test", image: null } }] });
     createAccessGrant.mockResolvedValue(grant({ id: "direct" }));
-    await renderSheet();
+    const client = await renderSheet();
     act(() => [...document.body.querySelectorAll("button")].find(button => button.textContent?.trim() === "Add someone")!.click());
     await settle();
     act(() => (document.body.querySelector('[role="combobox"]') as HTMLElement).click());
@@ -175,6 +179,7 @@ describe("IssueShareSheet", () => {
     act(() => [...document.body.querySelectorAll("button")].find(button => button.textContent?.trim() === "Add")!.click());
     await settle();
     expect(createAccessGrant).toHaveBeenCalledWith("i1", { subjectType: "user", subjectId: "u1" });
+    expect(client.getQueryState(queryKeys.issues.accessGrants("descendant"))?.isInvalidated).toBe(true);
   });
 
   it("hides Revoke entirely for non-setters", async () => {

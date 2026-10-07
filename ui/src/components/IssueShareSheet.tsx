@@ -216,7 +216,8 @@ export function IssueShareSheet({
     mutationFn: (payload: { subjectType: "user" | "agent"; subjectId: string }) =>
       issuesApi.createAccessGrant(issueId, payload),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.issues.accessGrants(issueId) });
+      // A task grant also changes descendant access and cached task discovery.
+      queryClient.invalidateQueries({ queryKey: ["issues"] });
       setAddSelection("");
       setView("list");
       pushToast({ title: "Access granted", tone: "success" });
@@ -229,7 +230,8 @@ export function IssueShareSheet({
   const revokeMutation = useMutation({
     mutationFn: (grant: IssueAccessGrant) => issuesApi.revokeAccessGrant(issueId, grant.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.issues.accessGrants(issueId) });
+      // A task grant also changes descendant access and cached task discovery.
+      queryClient.invalidateQueries({ queryKey: ["issues"] });
       setRevokeTarget(null);
       pushToast({ title: "Access revoked", tone: "success" });
     },
