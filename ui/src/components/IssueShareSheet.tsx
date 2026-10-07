@@ -207,7 +207,7 @@ export function IssueShareSheet({
     [grantsQuery.data],
   );
   const grantedSubjectKeys = useMemo(
-    () => new Set(activeGrants.filter((grant) => !grant.inherited && (grant.source === "explicit" || grant.source === "owner"))
+    () => new Set(activeGrants.filter((grant) => !grant.inherited && grant.source !== "project")
       .map((grant) => `${grant.subjectType}:${grant.subjectId}`)),
     [activeGrants],
   );

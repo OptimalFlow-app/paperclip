@@ -1,3 +1,4 @@
+import type { IssuePrivacyConstraints } from "@paperclipai/shared";
 import { canActorReadHeartbeatRun } from "../services/heartbeat-run-privacy.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
@@ -13065,6 +13066,25 @@ export function issueRoutes(
     });
 
     res.json(result);
+  });
+
+  router.get("/issues/:id/privacy-constraints", async (req, res) => {
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await resolveIssuePrivacyManagementRoot(req, res, issue))) return;
+    // A task owner need not be able to read its surrounding private scope.
+    // Read policy internally and return only action hints, never scope identity.
+    const [project] = issue.projectId ? await db.select({ visibility: projects.visibility, personalOwnerUserId: projects.personalOwnerUserId })
+      .from(projects).where(and(eq(projects.id, issue.projectId), eq(projects.companyId, issue.companyId))) : [];
+    const [parent] = issue.privacyParentIssueId ? await db.select({ visibility: issueRows.visibility, projectId: issueRows.projectId })
+      .from(issueRows).where(and(eq(issueRows.id, issue.privacyParentIssueId), eq(issueRows.companyId, issue.companyId))) : [];
+    const [parentProject] = parent?.projectId ? await db.select({ visibility: projects.visibility })
+      .from(projects).where(and(eq(projects.id, parent.projectId), eq(projects.companyId, issue.companyId))) : [];
+    res.json({
+      publicBlockedBy: project?.visibility === "private" && !project.personalOwnerUserId ? "project"
+        : parent?.visibility === "private" || parentProject?.visibility === "private" ? "parent" : null,
+      leavesPersonalProject: project?.visibility === "private" && Boolean(project.personalOwnerUserId),
+    } satisfies IssuePrivacyConstraints);
+    // Visibility writes still recheck these rules under the privacy-tree lock.
   });
 
   router.get("/issues/:id/access-grants", async (req, res) => {

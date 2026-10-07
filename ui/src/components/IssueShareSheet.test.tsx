@@ -162,7 +162,6 @@ describe("IssueShareSheet", () => {
   it.each([
     { source: "project" as const, inherited: true },
     { source: "explicit" as const, inherited: true },
-    { source: "assignment" as const, inherited: false },
   ])("allows an independent direct grant alongside $source access", async (access) => {
     listAccessGrants.mockResolvedValue([grant({ id: "broader", ...access })]);
     listUserDirectory.mockResolvedValue({ users: [{ user: { id: "u1", name: "Ada", email: "ada@example.test", image: null } }] });
@@ -180,6 +179,18 @@ describe("IssueShareSheet", () => {
     await settle();
     expect(createAccessGrant).toHaveBeenCalledWith("i1", { subjectType: "user", subjectId: "u1" });
     expect(client.getQueryState(queryKeys.issues.accessGrants("descendant"))?.isInvalidated).toBe(true);
+  });
+
+  it("does not offer a second grant for an existing direct assignment grant", async () => {
+    listAccessGrants.mockResolvedValue([grant({ source: "assignment" })]);
+    listUserDirectory.mockResolvedValue({ users: [{ user: { id: "u1", name: "Ada", image: null } }] });
+    await renderSheet();
+    act(() => [...document.body.querySelectorAll("button")].find(button => button.textContent?.trim() === "Add someone")!.click());
+    await settle();
+    act(() => (document.body.querySelector('[role="combobox"]') as HTMLElement).click());
+    await settle();
+    expect([...document.body.querySelectorAll('[role="option"]')].some(option => option.textContent?.includes("Ada"))).toBe(false);
+    expect(createAccessGrant).not.toHaveBeenCalled();
   });
 
   it("hides Revoke entirely for non-setters", async () => {

@@ -225,3 +225,16 @@ export const AddDirectGrantAlongsideInheritedAccess: Story = {
   },
 };
 export const MobileIndependentChildGrant: Story = { ...AddDirectGrantAlongsideInheritedAccess, globals: mobile };
+
+export const CurrentAssigneeAlreadyHasSavedAccess: Story = {
+  parameters: { privacy: { grants: "assignment" }, docs: { description: { story: "A direct assignment grant is already saved on this task. The API deduplicates subjects, so the add picker does not promise a second independent grant for the same assignee." } } },
+  render: () => <Sharing add="choose" />,
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    const dialog = await page.findByRole("dialog", { name: "Who can access this task" });
+    const trigger = within(dialog).getByRole("combobox");
+    if (trigger.getAttribute("aria-expanded") !== "true") await userEvent.click(trigger);
+    await page.findByRole("option", { name: "Morgan Reed" });
+    await expect(page.queryByRole("option", { name: "Executive assistant" })).not.toBeInTheDocument();
+  },
+};

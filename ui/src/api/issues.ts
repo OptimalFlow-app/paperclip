@@ -14,6 +14,7 @@ import type {
   IssueAccessGrant,
   IssueAccessGrantSubjectType,
   IssueVisibility,
+  IssuePrivacyConstraints,
   IssueChanges,
   IssueAttachment,
   IssueCostSummary,
@@ -597,6 +598,7 @@ export const issuesApi = {
   // Enriched grants for the share sheet: implicit-by-source rows (assignment /
   // project) plus explicit grants, each carrying subjectDisplayName / avatar /
   // agentVisibility from the server enrichment pass.
+  privacyConstraints: (id: string) => api.get<IssuePrivacyConstraints>(`/issues/${id}/privacy-constraints`),
   listAccessGrants: (id: string, options?: RequestOptions) =>
     options
       ? api.get<IssueAccessGrant[]>(`/issues/${id}/access-grants`, options)

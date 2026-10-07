@@ -5,6 +5,7 @@ import { Route, Routes, useNavigate } from "@/lib/router";
 import { Layout } from "@/components/Layout";
 import { IssueDetail } from "@/pages/IssueDetail";
 import { Issues } from "@/pages/Issues";
+import { ProjectDetail } from "@/pages/ProjectDetail";
 import { Projects } from "@/pages/Projects";
 import { DesignGuide } from "@/pages/DesignGuide";
 import { PluginLauncherProvider } from "@/plugins/launchers";
@@ -15,23 +16,25 @@ export function PrivacyPage({
   guide = false,
   projects = false,
   tasks = false,
+  projectSettings = false,
 }: {
   child?: boolean;
   guide?: boolean;
   projects?: boolean;
   tasks?: boolean;
+  projectSettings?: boolean;
 }) {
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
   useEffect(() => {
     navigate(
-      tasks ? "/PAP/issues" : projects ? "/PAP/projects" : guide
+      projectSettings ? "/PAP/projects/project-private/configuration" : tasks ? "/PAP/issues" : projects ? "/PAP/projects" : guide
         ? "/PAP/design-guide"
         : `/PAP/issues/${child ? "PAP-411" : "PAP-410"}`,
       { replace: true },
     );
     setReady(true);
-  }, [navigate, child, guide, projects, tasks]);
+  }, [navigate, child, guide, projects, tasks, projectSettings]);
   if (!ready) return null;
   return (
     <PluginLauncherProvider>
@@ -40,6 +43,7 @@ export function PrivacyPage({
           <Route path="issues" element={<Issues />} />
           <Route path="issues/:issueId" element={<IssueDetail />} />
           <Route path="projects" element={<Projects />} />
+          <Route path="projects/:projectId/*" element={<ProjectDetail />} />
           <Route path="design-guide" element={<DesignGuide />} />
         </Route>
       </Routes>
@@ -189,3 +193,24 @@ export const OwnerInheritedTaskMenu: Story = {
   },
 };
 export const MobileInheritedTaskMenu: Story = { ...OwnerInheritedTaskMenu, globals: mobile };
+
+export const ProjectVisibilityThroughAutosave: Story = {
+  render: () => <PrivacyPage projectSettings />,
+  parameters: { docs: { description: { story: "Actual project Configuration page. Open the project through its field-autosave control and review the private-task access consequence before saving." } } },
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("switch", { name: "Private project" }, { timeout: 15000 }));
+    await expect(await page.findByRole("alertdialog")).toHaveTextContent("will lose access");
+  },
+};
+export const ProjectVisibilityAutosaveCompletes: Story = {
+  ...ProjectVisibilityThroughAutosave,
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("switch", { name: "Private project" }, { timeout: 15000 }));
+    const dialog = await page.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Open to company" }));
+    await expect(await page.findByText(/Everyone in the company can discover this project/)).toBeVisible();
+  },
+};
+export const MobileProjectVisibilityThroughAutosave: Story = { ...ProjectVisibilityThroughAutosave, globals: mobile };

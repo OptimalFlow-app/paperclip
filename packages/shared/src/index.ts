@@ -1105,6 +1105,7 @@ export type {
   CompactIssue,
   Issue,
   IssueVisibility,
+  IssuePrivacyConstraints,
   IssueAccessGrant,
   IssueAccessGrantAgentVisibility,
   IssueAccessGrantSubjectType,

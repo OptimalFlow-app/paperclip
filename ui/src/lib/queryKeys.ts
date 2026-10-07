@@ -374,6 +374,7 @@ export const queryKeys = {
       options.excludeRoot
         ? (["issues", "cost-summary", issueId, "exclude-root"] as const)
         : (["issues", "cost-summary", issueId] as const),
+    privacyConstraints: (issueId: string) => ["issues", "privacy-constraints", issueId] as const,
     accessGrants: (issueId: string) => ["issues", "access-grants", issueId] as const,
     attachments: (issueId: string) => ["issues", "attachments", issueId] as const,
     attachmentPreview: (attachmentId: string) => ["issues", "attachment-preview", attachmentId] as const,

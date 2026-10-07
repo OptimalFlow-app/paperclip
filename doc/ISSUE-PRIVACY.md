@@ -189,3 +189,7 @@ for agent-created projects), the personal-project owner, and administrators.
 Project read membership alone never allows publishing the project or changing
 its audience. Legacy projects recover ownership from their creation audit event;
 when that evidence is missing, an administrator manages their privacy.
+
+### Task privacy management hints
+
+`GET /api/issues/:id/privacy-constraints` is available only to a principal who can read and manage that task. It returns the blocked scope kind and whether publishing leaves a personal project. It does not return protected parent or project names, identifiers, owners, or contents. This lets task owners manage their task without requiring access to its surrounding project. Visibility writes still enforce the canonical rules under the privacy-tree lock; these hints do not authorize a write.

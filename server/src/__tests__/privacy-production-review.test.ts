@@ -160,6 +160,56 @@ describe("private task production review", () => {
     expect(updated?.visibility).toBe("private");
   });
 
+  it("allows task management hints in an unreadable personal project without disclosing its identity", async () => {
+    const f = await fixture();
+    const [project] = await db.insert(projects).values({ companyId: f.company.id, name: "Protected personal context", visibility: "private", personalOwnerUserId: f.outsider, privacyOwnerUserId: f.outsider }).returning();
+    const id = randomUUID();
+    const [task] = await db.insert(issues).values({ id, companyId: f.company.id, title: "Owned task", visibility: "private", privacyRootIssueId: id, responsibleUserId: f.owner, projectId: project.id }).returning();
+    const { issueRoutes } = await import("../routes/issues.js");
+    const { projectRoutes } = await import("../routes/projects.js");
+    const app = express(); app.use(express.json());
+    app.use((req, _res, next) => { req.actor = f.actor(f.owner) as Express.Request["actor"]; next(); });
+    app.use("/api", issueRoutes(db, {} as any)); app.use("/api", projectRoutes(db));
+    app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => { res.status(err.status ?? 500).json({ error: err.message }); });
+    await request(app).get(`/api/projects/${project.id}`).expect(404);
+    const response = await request(app).get(`/api/issues/${task.id}/privacy-constraints`).expect(200);
+    expect(response.body).toEqual({ publicBlockedBy: null, leavesPersonalProject: true });
+    const { issueService } = await import("../services/issues.js");
+    expect(await issueService(db).update(task.id, { visibility: "open" })).toMatchObject({ visibility: "open", projectId: null });
+  });
+
+  it("reports an inaccessible private parent as a move-first constraint without leaking it", async () => {
+    const f = await fixture();
+    const parentId = randomUUID(), childId = randomUUID();
+    await db.insert(issues).values({ id: parentId, companyId: f.company.id, title: "Hidden parent content", visibility: "private", privacyRootIssueId: parentId, responsibleUserId: f.outsider });
+    await db.insert(issues).values({ id: childId, companyId: f.company.id, title: "Owned child", visibility: "private", privacyRootIssueId: parentId, privacyParentIssueId: parentId, responsibleUserId: f.owner });
+    const { issueRoutes } = await import("../routes/issues.js");
+    const app = express(); app.use(express.json());
+    app.use((req, _res, next) => { req.actor = f.actor(f.owner) as Express.Request["actor"]; next(); });
+    app.use("/api", issueRoutes(db, {} as any));
+    await request(app).get(`/api/issues/${parentId}`).expect(404);
+    const response = await request(app).get(`/api/issues/${childId}/privacy-constraints`).expect(200);
+    expect(response.body).toEqual({ publicBlockedBy: "parent", leavesPersonalProject: false });
+  });
+
+  it("does not expose task management hints to a shared reader or unrelated company", async () => {
+    const f = await fixture(); const id = randomUUID();
+    await db.insert(issues).values({ id, companyId: f.company.id, title: "Private", visibility: "private", privacyRootIssueId: id, responsibleUserId: f.owner });
+    const { issueRoutes } = await import("../routes/issues.js");
+    let actor = f.actor(f.outsider);
+    const app = express(); app.use(express.json());
+    app.use((req, _res, next) => { req.actor = actor as Express.Request["actor"]; next(); });
+    app.use("/api", issueRoutes(db, {} as any));
+    app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => { res.status(err.status ?? 500).json({ error: err.message }); });
+    await request(app).get(`/api/issues/${id}/privacy-constraints`).expect(404);
+    await db.insert(issueAccessGrants).values({ issueId: id, subjectType: "user", subjectId: f.outsider, source: "explicit" });
+    await request(app).get(`/api/issues/${id}/privacy-constraints`).expect(403);
+    actor = { ...f.actor(f.owner), companyIds: [] };
+    await db.update(companyMemberships).set({ status: "archived" }).where(and(eq(companyMemberships.companyId, f.company.id), eq(companyMemberships.principalId, f.owner)));
+    const denied = await request(app).get(`/api/issues/${id}/privacy-constraints`).expect(404);
+    expect(denied.body.publicBlockedBy).toBeUndefined();
+  });
+
   it("an unauthorized board user cannot fetch a private issue through PATCH", async () => {
     const f = await fixture();
     const id = randomUUID();

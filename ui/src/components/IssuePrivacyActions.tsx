@@ -14,7 +14,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { issuesApi } from "@/api/issues";
-import { projectsApi } from "@/api/projects";
 import { useToastActions } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
@@ -58,36 +57,18 @@ export function IssuePrivacyActions({
   const [shareOpen, setShareOpen] = useState(false);
   const [makePublicOpen, setMakePublicOpen] = useState(false);
   const isPrivate = issue.visibility === "private";
-  const checkScope = canManage && isPrivate;
-  const parentId = issue.privacyParentIssueId;
-  const parentQuery = useQuery({
-    queryKey: queryKeys.issues.detail(parentId ?? "__privacy-parent__"),
-    queryFn: () => issuesApi.get(parentId!),
-    enabled: checkScope && Boolean(parentId),
+  const constraintsQuery = useQuery({
+    queryKey: queryKeys.issues.privacyConstraints(issue.id),
+    queryFn: () => issuesApi.privacyConstraints(issue.id),
+    enabled: canManage && isPrivate,
   });
-  const projectQuery = useQuery({
-    queryKey: queryKeys.projects.detail(issue.projectId ?? "__privacy-project__"),
-    queryFn: () => projectsApi.get(issue.projectId!, companyId),
-    enabled: checkScope && Boolean(issue.projectId),
-  });
-  const parentProjectId = parentQuery.data?.projectId;
-  const parentProjectQuery = useQuery({
-    queryKey: queryKeys.projects.detail(parentProjectId ?? "__privacy-parent-project__"),
-    queryFn: () => projectsApi.get(parentProjectId!, companyId),
-    enabled: checkScope && Boolean(parentProjectId),
-  });
-  const scopeQueries = [
-    ...(parentId ? [parentQuery] : []),
-    ...(issue.projectId ? [projectQuery] : []),
-    ...(parentProjectId ? [parentProjectQuery] : []),
-  ];
-  const publicBlockedReason = scopeQueries.some(query => query.isError)
-    ? "Couldn't check inherited access. Retry before making this task public."
-    : scopeQueries.some(query => !query.data || query.isFetching)
-      ? "Checking inherited access…"
-      : parentQuery.data?.visibility === "private" || parentProjectQuery.data?.visibility === "private"
+  const publicBlockedReason = constraintsQuery.isError
+    ? "Couldn't check task privacy. Retry before making this task public."
+    : !constraintsQuery.data || constraintsQuery.isFetching
+      ? "Checking task privacy…"
+      : constraintsQuery.data.publicBlockedBy === "parent"
         ? "Move this task out of its private parent before making it public."
-        : projectQuery.data?.visibility === "private" && !projectQuery.data.personalOwnerUserId
+        : constraintsQuery.data.publicBlockedBy === "project"
           ? "Move this task out of its private project before making it public."
           : null;
 
@@ -155,9 +136,9 @@ export function IssuePrivacyActions({
             </button>,
             publicBlockedReason,
           )}
-          {canManage && scopeQueries.some(query => query.isError) ? (
+          {canManage && constraintsQuery.isError ? (
             <button type="button" className={MENU_ITEM_CLASS} onClick={() => {
-              for (const query of scopeQueries) if (query.isError) void query.refetch();
+              void constraintsQuery.refetch();
             }}>Retry access check</button>
           ) : null}
         </>
@@ -193,7 +174,7 @@ export function IssuePrivacyActions({
             <AlertDialogDescription>
               Everyone in the company will be able to read this task, its comments, documents, and
               run history. Existing private subtasks keep their privacy.{" "}
-              {projectQuery.data?.visibility === "private" && projectQuery.data.personalOwnerUserId
+              {constraintsQuery.data?.leavesPersonalProject
                 ? "This task will also leave your personal project. " : null}
               <span className="font-semibold text-foreground">Content already seen by others cannot be taken back.</span>
             </AlertDialogDescription>

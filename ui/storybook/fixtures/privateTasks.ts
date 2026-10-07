@@ -383,6 +383,7 @@ export function installPrivacyApi(state: PrivacyState) {
     const json = (value: unknown) => Response.json(value);
     if (!path.startsWith("/api/")) return previous(input, init);
     if (path.includes("/email/tasks/")) return json({ messages: [], publications: [] });
+    if (path.endsWith("/budgets/overview")) return json({ policies: [] });
     if (path === "/api/auth/get-session") return json(state.session);
     if (path === "/api/cli-auth/me") return json(state.access);
     if (path === "/api/companies") return json(storybookCompanies);
@@ -427,12 +428,16 @@ export function installPrivacyApi(state: PrivacyState) {
         if (error) return error;
         const parent = state.tasks.find(task => task.id === data.parentId);
         const project = state.projects.find(project => project.id === data.projectId);
-        const inheritedPrivate = parent?.visibility === "private" || project?.visibility === "private";
+        const privateParent = parent && (parent.visibility === "private"
+          || state.projects.some(project => project.id === parent.projectId && project.visibility === "private"));
+        const visibility = privateParent || project?.visibility === "private" ? "private" : data.visibility ?? "open";
         const issue = privacyTask({
-          visibility: "open",
-          privacyRootIssueId: null,
           ...data,
-          ...(inheritedPrivate ? { visibility: "private", privacyRootIssueId: parent?.privacyRootIssueId ?? "privacy-created" } : {}),
+          visibility,
+          privacyParentIssueId: parent?.id ?? null,
+          privacyRootIssueId: visibility === "private"
+            ? privateParent ? parent.privacyRootIssueId ?? parent.id : "privacy-created"
+            : null,
           id: "privacy-created",
           identifier: "PAP-414",
           responsibleUserId: privacyOwnerId,
@@ -496,6 +501,18 @@ export function installPrivacyApi(state: PrivacyState) {
           state.operations.push("Task audience: " + item.visibility);
         }
         return json(item);
+      }
+      if (resource === "privacy-constraints") {
+        if (state.options.loading === "parent") return pause(init?.signal);
+        const error = fail("parent"); if (error) return error;
+        const project = state.projects.find(project => project.id === item.projectId);
+        const parent = state.tasks.find(task => task.id === item.privacyParentIssueId);
+        const parentProject = state.projects.find(project => project.id === parent?.projectId);
+        return json({
+          publicBlockedBy: project?.visibility === "private" && !project.personalOwnerUserId ? "project"
+            : parent?.visibility === "private" || parentProject?.visibility === "private" ? "parent" : null,
+          leavesPersonalProject: project?.visibility === "private" && Boolean(project.personalOwnerUserId),
+        });
       }
       if (resource === "access-grants") {
         if (method === "GET")
