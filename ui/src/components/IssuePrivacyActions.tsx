@@ -175,7 +175,7 @@ export function IssuePrivacyActions({
               Everyone in the company will be able to read this task, its comments, documents, and
               run history. Existing private subtasks keep their privacy.{" "}
               {constraintsQuery.data?.leavesPersonalProject
-                ? "This task will also leave your personal project. " : null}
+                ? "This task will also leave its personal project. " : null}
               <span className="font-semibold text-foreground">Content already seen by others cannot be taken back.</span>
             </AlertDialogDescription>
           </AlertDialogHeader>

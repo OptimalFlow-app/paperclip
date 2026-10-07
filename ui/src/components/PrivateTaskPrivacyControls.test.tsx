@@ -71,7 +71,7 @@ describe("inherited privacy controls", () => {
     expect(publicButton().disabled).toBe(false);
     expect(api.getProject).not.toHaveBeenCalled();
     flushSync(() => publicButton().click()); await settle();
-    expect(document.body.textContent).toContain("leave your personal project");
+    expect(document.body.textContent).toContain("leave its personal project");
     const confirm = [...document.body.querySelectorAll('[role="alertdialog"] button')].find(button => button.textContent === "Make public")!;
     flushSync(() => (confirm as HTMLButtonElement).click()); await settle();
     expect(api.setVisibility).toHaveBeenCalledWith("child", "open");

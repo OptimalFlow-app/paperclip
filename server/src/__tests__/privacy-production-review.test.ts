@@ -244,6 +244,42 @@ describe("private task production review", () => {
     expect(await canActorReadIssuePrivacy(db, f.actor(f.outsider), grandchild)).toBe(false);
   });
 
+  it("binds child-manager grant writes to the child and rejects ancestor or sibling grants", async () => {
+    const f = await fixture();
+    const { issueService } = await import("../services/issues.js");
+    const { issueRoutes } = await import("../routes/issues.js");
+    const { errorHandler } = await import("../middleware/index.js");
+    const svc = issueService(db);
+    const root = await svc.create(f.company.id, { title: "Ancestor", visibility: "private", createdByUserId: f.outsider });
+    const child = await svc.create(f.company.id, { title: "Managed child", parentId: root.id, createdByUserId: f.owner });
+    const grandchild = await svc.create(f.company.id, { title: "Descendant", parentId: child.id, createdByUserId: f.outsider });
+    const sibling = await svc.create(f.company.id, { title: "Sibling", parentId: root.id, createdByUserId: f.outsider });
+    const [rootGrant] = await db.insert(issueAccessGrants).values({ issueId: root.id, subjectType: "user", subjectId: f.owner, source: "explicit" }).returning();
+    const [siblingGrant] = await db.insert(issueAccessGrants).values({ issueId: sibling.id, subjectType: "user", subjectId: f.owner, source: "explicit" }).returning();
+    const app = express(); app.use(express.json());
+    app.use((req, _res, next) => { req.actor = f.actor(f.owner); next(); });
+    app.use("/api", issueRoutes(db, {} as any)); app.use(errorHandler);
+    const audience = await request(app).get(`/api/issues/${child.id}/access-grants`).expect(200);
+    expect(audience.body).toContainEqual(expect.objectContaining({ id: rootGrant.id, inherited: true }));
+    for (const grant of [rootGrant, siblingGrant]) {
+      await request(app).post(`/api/issues/${child.id}/access-grants/${grant.id}/revoke`).send({}).expect(404);
+      const [unchanged] = await db.select().from(issueAccessGrants).where(eq(issueAccessGrants.id, grant.id));
+      expect(unchanged.revokedAt).toBeNull();
+    }
+    for (const task of [root, sibling]) {
+      await request(app).post(`/api/issues/${task.id}/access-grants`).send({ subjectType: "agent", subjectId: f.agent.id }).expect(403);
+    }
+    const added = await request(app).post(`/api/issues/${child.id}/access-grants`).send({ subjectType: "agent", subjectId: f.agent.id }).expect(201);
+    expect(added.body.issueId).toBe(child.id);
+    const agent: AuthorizationActor = { type: "agent", companyId: f.company.id, agentId: f.agent.id };
+    for (const [task, expected] of [[root, false], [child, true], [grandchild, true], [sibling, false]] as const) {
+      expect(await canActorReadIssuePrivacy(db, agent, task)).toBe(expected);
+    }
+    await request(app).post(`/api/issues/${child.id}/access-grants/${added.body.id}/revoke`).send({}).expect(200);
+    expect(await canActorReadIssuePrivacy(db, agent, child)).toBe(false);
+    expect(await canActorReadIssuePrivacy(db, agent, grandchild)).toBe(false);
+  });
+
   it("retains a child assignment grant after unassignment without granting the root", async () => {
     const f = await fixture();
     const { issueService } = await import("../services/issues.js");

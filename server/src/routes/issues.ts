@@ -5214,7 +5214,7 @@ export function issueRoutes(
     return false;
   }
 
-  async function resolveIssuePrivacyManagementRoot(
+  async function resolveManagedIssueForPrivacy(
     req: Request,
     res: Response,
     issue: Parameters<typeof decideIssueAccess>[1] & {
@@ -5225,6 +5225,8 @@ export function issueRoutes(
   ) {
     if (!(await assertIssueReadAllowed(req, res, issue))) return null;
     if (!(await assertCanManageIssuePrivacy(req, res, issue))) return null;
+    // Management is scoped to this exact task; an ancestor privacy root is
+    // inheritance provenance, never authority to mutate its grants.
     return issue;
   }
 
@@ -13070,7 +13072,7 @@ export function issueRoutes(
 
   router.get("/issues/:id/privacy-constraints", async (req, res) => {
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
-    if (!issue || !(await resolveIssuePrivacyManagementRoot(req, res, issue))) return;
+    if (!issue || !(await resolveManagedIssueForPrivacy(req, res, issue))) return;
     // A task owner need not be able to read its surrounding private scope.
     // Read policy internally and return only action hints, never scope identity.
     const [project] = issue.projectId ? await db.select({ visibility: projects.visibility, personalOwnerUserId: projects.personalOwnerUserId })
@@ -13090,8 +13092,8 @@ export function issueRoutes(
   router.get("/issues/:id/access-grants", async (req, res) => {
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
     if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
-    const privacyRoot = await resolveIssuePrivacyManagementRoot(req, res, issue);
-    if (!privacyRoot) return;
+    const managedIssue = await resolveManagedIssueForPrivacy(req, res, issue);
+    if (!managedIssue) return;
     const ancestry = await db.select().from(issueRows).where(inArray(issueRows.id, sql`(
       with recursive ancestry as (
         select id, company_id, privacy_parent_issue_id from issues where id = ${issue.id} and company_id = ${issue.companyId}
@@ -13128,9 +13130,9 @@ export function issueRoutes(
     async (req, res) => {
       const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
       if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
-      const privacyRoot = await resolveIssuePrivacyManagementRoot(req, res, issue);
-      if (!privacyRoot) return;
-      if (privacyRoot.privacyRootIssueId === null) {
+      const managedIssue = await resolveManagedIssueForPrivacy(req, res, issue);
+      if (!managedIssue) return;
+      if (managedIssue.privacyRootIssueId === null) {
         res.status(409).json({ error: "Open issues do not require access grants" });
         return;
       }
@@ -13139,7 +13141,7 @@ export function issueRoutes(
       await assertIssueGrantSubjectExists(issue.companyId, subjectType, subjectId);
       const actor = getActorInfo(req);
       const result = await db.transaction((tx) => ensureActiveIssueAccessGrant(tx, {
-        issueId: privacyRoot.id,
+        issueId: managedIssue.id,
         subjectType,
         subjectId,
         source: "explicit",
@@ -13176,15 +13178,14 @@ export function issueRoutes(
     async (req, res) => {
       const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
       if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
-      const privacyRoot = await resolveIssuePrivacyManagementRoot(req, res, issue);
-      if (!privacyRoot) return;
-      const grantIssueIds = [...new Set([issue.id, privacyRoot.id])];
+      const managedIssue = await resolveManagedIssueForPrivacy(req, res, issue);
+      if (!managedIssue) return;
       const [grant] = await db
         .update(issueAccessGrants)
         .set({ revokedAt: new Date() })
         .where(and(
           eq(issueAccessGrants.id, req.params.grantId as string),
-          inArray(issueAccessGrants.issueId, grantIssueIds),
+          eq(issueAccessGrants.issueId, managedIssue.id),
           isNull(issueAccessGrants.revokedAt),
         ))
         .returning();
@@ -13395,7 +13396,7 @@ export function issueRoutes(
       }
       // An authorized agent may restrict a task; widening access remains an owner/admin action.
       if (req.body.visibility !== undefined && !(req.actor.type === "agent" && req.body.visibility === "private")
-        && !(await resolveIssuePrivacyManagementRoot(req, res, existing))) return;
+        && !(await resolveManagedIssueForPrivacy(req, res, existing))) return;
       // MCP task changes cannot stop a run or implicitly decide a pending review.
       const mcpParticipationChange = req.actor.source === "mcp_oauth" &&
         ["status", "assigneeAgentId", "assigneeUserId", "blockedByIssueIds", "parentId", "projectId"].some(key => req.body[key] !== undefined);
