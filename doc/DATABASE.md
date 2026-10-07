@@ -226,6 +226,14 @@ When authoring migrations or one-time backfills:
 - Split schema changes, index creation, and data backfill into separate phases so each step has clear locking and rollback behavior.
 - Treat the `check:migrations` CI gate as the enforcement backstop for these rules. If it flags a migration, rewrite the migration or add a suppression comment with the indexed predicate, batch bound, and reason the remaining scan is safe.
 
+Private-task migrations `0311` and `0312` are explicitly allowlisted in the
+Paperclip executor to run outside a file-wide transaction. Their idempotent
+keyset batches commit every 1,000 rows, and migration history is recorded only
+when all batches finish. The executor repairs invalid concurrent indexes on
+retry. Bootstrap uses the same executor; other migrations remain transactional
+per file. Apply these migrations through `pnpm db:migrate` using a direct
+connection, before enabling the new server and UI.
+
 ## Migration snapshots
 
 `drizzle-kit generate` diffs `packages/db/src/schema/` against the newest snapshot in `packages/db/src/migrations/meta/`. That snapshot must describe the schema that every migration produces when they run in order. A snapshot that drifts from the schema makes the *next* migration wrong, because `generate` folds the drift into it. The drift can add a column that an earlier migration already created, which makes that migration fail on a fresh database. It can also drop a column that the schema still uses.

@@ -60,7 +60,7 @@ describeEmbeddedPostgres("heartbeat run issue privacy migration", () => {
       )
       VALUES
         (${firstRunId}, ${companyId}, ${agentId}, 'succeeded', NULL, ${sql.json({ issueId: firstIssueId })}),
-        (${secondRunId}, ${companyId}, ${agentId}, 'failed', NULL, ${sql.json({ issueId: secondIssueId })}),
+        (${secondRunId}, ${companyId}, ${agentId}, 'failed', NULL, ${sql.json({ taskId: secondIssueId })}),
         (${maintenanceRunId}, ${companyId}, ${agentId}, 'succeeded', NULL, ${sql.json({ wakeReason: "heartbeat_timer" })})
     `;
 
@@ -94,12 +94,21 @@ describeEmbeddedPostgres("heartbeat run issue privacy migration", () => {
 
     const [parity] = await sql<{ expected_count: number; populated_count: number }[]>`
       SELECT
-        count(*) FILTER (WHERE "context_snapshot" ? 'issueId')::int AS "expected_count",
-        count(*) FILTER (WHERE "context_snapshot" ? 'issueId' AND "issue_id" IS NOT NULL)::int AS "populated_count"
+        count(*) FILTER (WHERE "context_snapshot" ? 'issueId' OR "context_snapshot" ? 'taskId')::int AS "expected_count",
+        count(*) FILTER (WHERE ("context_snapshot" ? 'issueId' OR "context_snapshot" ? 'taskId') AND "issue_id" IS NOT NULL)::int AS "populated_count"
       FROM "heartbeat_runs"
       WHERE "id" IN (${firstRunId}, ${secondRunId}, ${maintenanceRunId})
     `;
     expect(parity).toEqual({ expected_count: 2, populated_count: 2 });
+
+    const [newRun] = await sql<{ id: string; issue_id: string | null; scope_kind: string }[]>`
+      INSERT INTO heartbeat_runs (company_id, agent_id, status, context_snapshot)
+      VALUES (${companyId}, ${agentId}, 'succeeded', ${sql.json({ taskId: secondIssueId })})
+      RETURNING id, issue_id, scope_kind`;
+    expect(newRun).toMatchObject({ issue_id: secondIssueId, scope_kind: "issue" });
+    await sql`UPDATE heartbeat_runs SET context_snapshot = '{}'::jsonb, scope_kind = 'company' WHERE id = ${newRun.id}`;
+    expect(await sql`SELECT issue_id, scope_kind FROM heartbeat_runs WHERE id = ${newRun.id}`)
+      .toEqual([{ issue_id: secondIssueId, scope_kind: "issue" }]);
 
     const indexes = await sql<{ indexname: string }[]>`
       SELECT "indexname"
@@ -142,16 +151,83 @@ describeEmbeddedPostgres("heartbeat run issue privacy migration", () => {
       VALUES
         (${companyId}, ${agentId}, 'succeeded', ${sql.json({ issueId: "not-a-uuid" })}),
         (${companyId}, ${agentId}, 'succeeded', ${sql.json({ issueId: randomUUID() })}),
-        (${companyId}, ${agentId}, 'succeeded', ${sql.json({ issueId: foreignIssueId })})
+        (${companyId}, ${agentId}, 'succeeded', ${sql.json({ issueId: foreignIssueId })}),
+        (${companyId}, ${agentId}, 'succeeded', ${sql.json({ taskId: "not-a-uuid" })}),
+        (${companyId}, ${agentId}, 'succeeded', ${sql.json({ taskId: randomUUID() })}),
+        (${companyId}, ${agentId}, 'succeeded', ${sql.json({ taskId: foreignIssueId })}),
+        (${companyId}, ${agentId}, 'succeeded', ${sql.json({ taskId: null })})
     `;
 
     await applyPendingMigrations(database.connectionString);
     const rows = await sql<{ issue_id: string | null; scope_kind: string }[]>`
       SELECT issue_id, scope_kind FROM heartbeat_runs WHERE company_id = ${companyId}`;
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(7);
     expect(rows.every(row => row.scope_kind === "issue" && row.issue_id === null)).toBe(true);
     // Re-running the migration preserves fail-closed tombstones and constraints.
     await sql`DELETE FROM "drizzle"."__drizzle_migrations" WHERE "hash" = ${await migrationHash()}`;
     await applyPendingMigrations(database.connectionString);
   }, 30_000);
+
+  it("releases schema and completed-batch row locks and resumes after interruption", async () => {
+    const database = await startEmbeddedPostgresTestDatabase("paperclip-privacy-batch-commits-");
+    cleanups.push(database.cleanup);
+    const sql = postgres(database.connectionString, { max: 1, onnotice: () => {} });
+    cleanups.push(async () => sql.end());
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    const runId = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
+    await sql`INSERT INTO companies (id, name, issue_prefix) VALUES (${companyId}, 'Batch commits', 'BCH')`;
+    await sql`INSERT INTO agents (id, company_id, name, adapter_type) VALUES (${agentId}, ${companyId}, 'Runner', 'process')`;
+    await sql`INSERT INTO issues (id, company_id, title, visibility) VALUES (${issueId}, ${companyId}, 'Private task', 'private')`;
+    await sql`DROP TRIGGER heartbeat_runs_set_scope_kind ON heartbeat_runs`;
+    await sql`INSERT INTO heartbeat_runs (id, company_id, agent_id, status, context_snapshot)
+      SELECT ('00000000-0000-0000-0000-' || lpad(n::text, 12, '0'))::uuid,
+        ${companyId}::uuid, ${agentId}::uuid, 'succeeded', ${sql.json({ taskId: issueId })}::jsonb
+      FROM generate_series(1, 1001) n`;
+    // A failed concurrent build must be repaired rather than skipped by
+    // CREATE INDEX IF NOT EXISTS when the migration is retried.
+    await sql`DROP INDEX heartbeat_runs_company_issue_created_idx`;
+    await expect(sql.unsafe("CREATE UNIQUE INDEX CONCURRENTLY heartbeat_runs_company_issue_created_idx ON heartbeat_runs (company_id)"))
+      .rejects.toThrow();
+    await sql.unsafe(`CREATE FUNCTION interrupt_privacy_batch_fixture() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        PERFORM pg_advisory_xact_lock(736319937);
+        RAISE EXCEPTION 'fixture interrupted second batch';
+      END $$`);
+    await sql.unsafe(`CREATE TRIGGER zzz_interrupt_privacy_batch_fixture BEFORE UPDATE ON heartbeat_runs
+      FOR EACH ROW WHEN (OLD.scope_kind = 'company' AND NEW.id = '${runId(1001)}'::uuid)
+      EXECUTE FUNCTION interrupt_privacy_batch_fixture()`);
+    const hash = await migrationHash();
+    await sql`DELETE FROM drizzle.__drizzle_migrations WHERE hash = ${hash}`;
+    await sql`SELECT pg_advisory_lock(736319937)`;
+    const migration = applyPendingMigrations(database.connectionString).then(() => null, error => error);
+    try {
+      // The second batch is blocked while another session can see the first
+      // committed batch and write a row whose lock has already been released.
+      await expect.poll(async () => {
+        const [row] = await sql`SELECT count(*)::int AS n FROM heartbeat_runs
+          WHERE company_id = ${companyId} AND scope_kind = 'issue'`;
+        return row.n;
+      }, { timeout: 10_000 }).toBe(1000);
+      await sql`SET lock_timeout = '500ms'`;
+      await sql`UPDATE heartbeat_runs SET context_snapshot = context_snapshot || '{"probe":"visible"}'::jsonb
+        WHERE id = ${runId(1)}`;
+      expect(await sql`SELECT context_snapshot->>'probe' AS probe FROM heartbeat_runs WHERE id = ${runId(1)}`)
+        .toEqual([{ probe: "visible" }]);
+    } finally {
+      await sql`SELECT pg_advisory_unlock(736319937)`;
+      await sql`RESET lock_timeout`;
+    }
+    expect(await migration).toMatchObject({ message: "fixture interrupted second batch" });
+    expect(await sql`SELECT hash FROM drizzle.__drizzle_migrations WHERE hash = ${hash}`).toHaveLength(0);
+    await sql`DROP TRIGGER zzz_interrupt_privacy_batch_fixture ON heartbeat_runs`;
+    await sql`DROP FUNCTION interrupt_privacy_batch_fixture()`;
+    await applyPendingMigrations(database.connectionString);
+    const [finished] = await sql`SELECT count(*)::int AS n FROM heartbeat_runs
+      WHERE company_id = ${companyId} AND scope_kind = 'issue' AND issue_id = ${issueId}`;
+    expect(finished.n).toBe(1001);
+    expect(await sql`SELECT indisvalid FROM pg_index WHERE indexrelid = 'heartbeat_runs_company_issue_created_idx'::regclass`)
+      .toEqual([{ indisvalid: true }]);
+    expect(await sql`SELECT hash FROM drizzle.__drizzle_migrations WHERE hash = ${hash}`).toHaveLength(1);
+  }, 30_000);
+
 });

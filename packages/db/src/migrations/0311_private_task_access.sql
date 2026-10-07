@@ -1,3 +1,5 @@
+-- Runs through the Paperclip migration executor outside a file-wide transaction.
+-- Each idempotent keyset batch commits before advancing; history is recorded last.
 CREATE TABLE IF NOT EXISTS "issue_access_grants" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"issue_id" uuid NOT NULL,
@@ -82,10 +84,10 @@ DO $$ BEGIN
     ALTER TABLE "workspace_operations" ADD CONSTRAINT "workspace_operations_issue_id_issues_id_fk" FOREIGN KEY ("issue_id") REFERENCES "public"."issues"("id") ON DELETE set null ON UPDATE no action;
   END IF;
 END $$;--> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "heartbeat_runs_company_issue_created_idx" ON "heartbeat_runs" USING btree ("company_id","issue_id","created_at");--> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "issues_company_privacy_parent_idx" ON "issues" USING btree ("company_id","privacy_parent_issue_id");--> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "issues_company_privacy_root_idx" ON "issues" USING btree ("company_id","privacy_root_issue_id");--> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS "projects_company_personal_owner_uq" ON "projects" USING btree ("company_id","personal_owner_user_id") WHERE "projects"."personal_owner_user_id" is not null;--> statement-breakpoint
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "heartbeat_runs_company_issue_created_idx" ON "heartbeat_runs" USING btree ("company_id","issue_id","created_at");--> statement-breakpoint
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "issues_company_privacy_parent_idx" ON "issues" USING btree ("company_id","privacy_parent_issue_id");--> statement-breakpoint
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "issues_company_privacy_root_idx" ON "issues" USING btree ("company_id","privacy_root_issue_id");--> statement-breakpoint
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "projects_company_personal_owner_uq" ON "projects" USING btree ("company_id","personal_owner_user_id") WHERE "projects"."personal_owner_user_id" is not null;--> statement-breakpoint
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'heartbeat_runs_scope_binding_check' AND conrelid = 'public.heartbeat_runs'::regclass) THEN
     ALTER TABLE "heartbeat_runs" ADD CONSTRAINT "heartbeat_runs_scope_binding_check" CHECK (("heartbeat_runs"."scope_kind" = 'company' AND "heartbeat_runs"."issue_id" IS NULL)
@@ -118,10 +120,10 @@ BEGIN
     RETURN NEW;
   END IF;
   candidate := coalesce(NEW.native_issue_id, NEW.issue_id);
-  IF candidate IS NULL AND NEW.context_snapshot->>'issueId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
-    candidate := (NEW.context_snapshot->>'issueId')::uuid;
+  IF candidate IS NULL AND coalesce(NEW.context_snapshot->>'issueId', NEW.context_snapshot->>'taskId') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    candidate := coalesce(NEW.context_snapshot->>'issueId', NEW.context_snapshot->>'taskId')::uuid;
   END IF;
-  IF candidate IS NOT NULL OR NEW.context_snapshot ? 'issueId' OR NEW.scope_kind = 'issue' THEN
+  IF candidate IS NOT NULL OR NEW.context_snapshot ? 'issueId' OR NEW.context_snapshot ? 'taskId' OR NEW.scope_kind = 'issue' THEN
     NEW.scope_kind := 'issue';
     SELECT id INTO NEW.issue_id FROM issues WHERE id = candidate AND company_id = NEW.company_id;
   ELSE
@@ -144,6 +146,7 @@ BEGIN LOOP
   SELECT id INTO next_id FROM changed ORDER BY id DESC LIMIT 1;
   EXIT WHEN next_id IS NULL;
   cursor_id := next_id;
+  COMMIT;
 END LOOP; END $$;
 --> statement-breakpoint
 -- Existing structural children acquire downward inheritance without widening
@@ -156,6 +159,7 @@ BEGIN LOOP
   SELECT id INTO next_id FROM changed ORDER BY id DESC LIMIT 1;
   EXIT WHEN next_id IS NULL;
   cursor_id := next_id;
+  COMMIT;
 END LOOP; END $$;
 --> statement-breakpoint
 -- Keep workspace provenance after reassignment/deletion. A previous task may
@@ -202,6 +206,7 @@ BEGIN LOOP
   SELECT id INTO next_id FROM changed ORDER BY id DESC LIMIT 1;
   EXIT WHEN next_id IS NULL;
   cursor_id := next_id;
+  COMMIT;
 END LOOP; END $$;
 
 --> statement-breakpoint
@@ -237,6 +242,7 @@ BEGIN
     EXIT WHEN batch_ids IS NULL;
     UPDATE workspace_operations SET metadata = metadata WHERE id = ANY(batch_ids);
     cursor_id := batch_ids[array_length(batch_ids, 1)];
+    COMMIT;
   END LOOP;
 END $$;
 
@@ -263,5 +269,6 @@ BEGIN
       WHERE id = ANY(batch_ids) AND visibility = 'private' AND privacy_owner_user_id IS NOT NULL
       ON CONFLICT (project_id, subject_type, subject_id) DO NOTHING;
     cursor_id := batch_ids[array_length(batch_ids, 1)];
+    COMMIT;
   END LOOP;
 END $$;
