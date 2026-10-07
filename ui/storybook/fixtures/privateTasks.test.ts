@@ -180,11 +180,10 @@ describe("preview owner and saved assignment access", () => {
   });
   it("does not add an assignment grant beside an existing independent direct grant", async () => {
     const state = createPrivacyState({ grants: "empty" });
-    state.tasks[0]!.assigneeAgentId = "agent-dedicated";
     state.grants.push(privacyGrant({ subjectType: "agent", subjectId: "agent-dedicated" }));
     const restore = installPrivacyApi(state);
     try {
-      await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ title: "Keep its independent access" }) });
+      await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ assigneeAgentId: "agent-dedicated" }) });
       expect(state.grants.filter(grant => grant.issueId === "privacy-root" && grant.subjectId === "agent-dedicated")).toHaveLength(1);
     } finally { restore(); }
   });
@@ -195,6 +194,35 @@ describe("preview owner and saved assignment access", () => {
       const grants = await fetch("/api/issues/privacy-created/access-grants").then(response => response.json());
       expect(grants).toContainEqual(expect.objectContaining({ issueId: "privacy-created", subjectId: "user-board", source: "owner", inherited: false }));
       expect(grants.filter((grant: { source: string }) => grant.source === "assignment")).toHaveLength(assigneeAgentId ? 1 : 0);
+    } finally { restore(); }
+  });
+});
+
+
+describe("revoked assignment access in previews", () => {
+  it("does not restore a revoked assignment grant after unrelated edits", async () => {
+    const state = createPrivacyState(); const restore = installPrivacyApi(state);
+    try {
+      await fetch("/api/issues/privacy-root/access-grants/grant-assignment/revoke", { method: "POST", body: "{}" });
+      for (const data of [{ title: "Edited after revocation" }, { status: "done" }]) {
+        await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify(data) });
+      }
+      const grants = await fetch("/api/issues/privacy-root/access-grants").then(response => response.json());
+      expect(grants.filter((grant: { issueId: string; subjectId: string; revokedAt: string | null }) => grant.issueId === "privacy-root" && grant.subjectId === "agent-dedicated" && grant.revokedAt === null)).toHaveLength(0);
+      expect(state.tasks[0]!.assigneeAgentId).toBe("agent-dedicated");
+    } finally { restore(); }
+  });
+  it("saves a fresh assignment grant after an actual reassignment", async () => {
+    const state = createPrivacyState(); const restore = installPrivacyApi(state);
+    try {
+      await fetch("/api/issues/privacy-root/access-grants/grant-assignment/revoke", { method: "POST", body: "{}" });
+      await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ assigneeAgentId: null }) });
+      await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ assigneeAgentId: "agent-dedicated" }) });
+      const grants = await fetch("/api/issues/privacy-root/access-grants").then(response => response.json());
+      const active = grants.filter((grant: { issueId: string; subjectId: string; revokedAt: string | null }) => grant.issueId === "privacy-root" && grant.subjectId === "agent-dedicated" && grant.revokedAt === null);
+      expect(active).toHaveLength(1);
+      expect(active[0]).toMatchObject({ source: "assignment", inherited: false });
+      expect(active[0].id).not.toBe("grant-assignment");
     } finally { restore(); }
   });
 });

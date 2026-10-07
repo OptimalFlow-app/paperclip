@@ -572,6 +572,7 @@ export function installPrivacyApi(state: PrivacyState) {
           }
           if (data.projectId !== undefined && next.projectId) next.project = state.projects.find(project => project.id === next.projectId) ?? null;
           if (!next.projectId) next.project = null;
+          const assignmentChanged = item.visibility !== "private" || item.assigneeAgentId !== next.assigneeAgentId || item.assigneeUserId !== next.assigneeUserId;
           Object.assign(item, next);
           if (changesPrivacy && item.visibility === "private") {
             for (const descendant of privacySubtree([item.id])) {
@@ -580,8 +581,9 @@ export function installPrivacyApi(state: PrivacyState) {
               descendant.privacyRootIssueId = item.privacyRootIssueId ?? item.id;
               descendant.privacyParentIssueId ??= descendant.parentId;
             }
+            savePrivacyAssignments(privacySubtree([item.id]).filter(task => task.id !== item.id), state.grants);
           }
-          savePrivacyAssignments(item.visibility === "private" && changesPrivacy ? privacySubtree([item.id]) : [item], state.grants);
+          if (assignmentChanged) savePrivacyAssignments([item], state.grants);
           state.operations.push("Task audience: " + item.visibility);
         }
         return json(item);
