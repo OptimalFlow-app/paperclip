@@ -1,5 +1,5 @@
 import { activeIssueInteractionCondition, ordinaryQuestionCondition } from "../issue-question-context.js";
-import { validateNativeDeliverableEvidence } from "./native-deliverable-feedback.js";
+import { publishedTaskDocuments, validateNativeDeliverableEvidence } from "./native-deliverable-feedback.js";
 import { findAutomaticCompletionReviews } from "./automatic-completion-reviews.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { issueService } from "../issues.js";
@@ -12,8 +12,6 @@ import {
   approvals,
   agents,
   companies,
-  documents,
-  issueDocuments,
   heartbeatRuns,
   completionContracts,
   issueApprovals,
@@ -33,21 +31,11 @@ function record(value: unknown): Record<string, unknown> {
 
 /** Reconstruct links from current task state, never from provider-supplied URLs. */
 async function savedDocumentLinks(db: Db, run: typeof heartbeatRuns.$inferSelect, issue: typeof issues.$inferSelect) {
-  const receipts = Object.values(record(run.resultJson?.semanticToolReceipts));
-  const revisions = new Set(receipts.flatMap(value => {
-    const receipt = record(value), result = record(receipt.result), document = record(result.document);
-    return receipt.operationId === "write_document" && result.disposition === "applied"
-      && typeof document.id === "string" && typeof document.latestRevisionId === "string"
-      ? [`${document.id}/${document.latestRevisionId}`] : [];
-  }));
-  if (!revisions.size) return [];
-  const saved = await db.select({ id: documents.id, revisionId: documents.latestRevisionId,
-    key: issueDocuments.key, issuePrefix: companies.issuePrefix })
-    .from(issueDocuments).innerJoin(documents, and(eq(documents.id, issueDocuments.documentId), eq(documents.companyId, run.companyId)))
-    .innerJoin(companies, eq(companies.id, run.companyId))
-    .where(and(eq(issueDocuments.companyId, run.companyId), eq(issueDocuments.issueId, issue.id)));
-  return saved.filter(document => revisions.has(`${document.id}/${document.revisionId}`))
-    .map(document => `[Saved document](/${encodeURIComponent(document.issuePrefix)}/issues/${encodeURIComponent(issue.identifier ?? issue.id)}#document-${encodeURIComponent(document.key)})`);
+  const saved = await publishedTaskDocuments(db, { companyId: run.companyId, issueId: issue.id });
+  if (!saved.length) return [];
+  const [company] = await db.select({ issuePrefix: companies.issuePrefix }).from(companies).where(eq(companies.id, run.companyId));
+  if (!company) return [];
+  return saved.map(document => `[Saved document](/${encodeURIComponent(company.issuePrefix)}/issues/${encodeURIComponent(issue.identifier ?? issue.id)}#document-${encodeURIComponent(document.key)})`);
 }
 
 /** Read current constraints before accepting the report, not a premature status commit. */

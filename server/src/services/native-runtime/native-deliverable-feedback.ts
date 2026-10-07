@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { assets, documents, issueDocuments, issueAttachments, issueWorkProducts, type Db } from "@paperclipai/db";
+import { assets, documents, documentRevisions, heartbeatRuns, issueDocuments, issueAttachments, issueWorkProducts, type Db } from "@paperclipai/db";
 import type { PrpStructuredRunResult } from "../../vendor/paperclip-runner/index.js";
 
 function evidenceRefs(value: unknown): string[] {
@@ -88,10 +88,15 @@ export function explicitlyRequestsFileOutput(objective: string): boolean {
 
 /** An explicitly requested document on the task must be published there. */
 export function explicitlyRequestsTaskDocumentOutput(objective: string): boolean {
-  return objective.split(/(?:[.!?](?:\s|$)|\n|[;,]|\bbut\b)/iu).some(clause => {
+  // Keep comma-separated conditions with their imperative. This is a narrow
+  // unconditional-output guard, not an interpreter of whether a condition held.
+  return objective.split(/(?:[.!?](?:\s|$)|\n|;)/iu).some(clause => {
+    if (/\b(?:if|unless|when|once|otherwise|provided that|in case|optionally)\b/iu.test(clause)) return false;
     const create = /\b(?:create|make|write|save|publish|prepare|provide|attach)\b/iu.exec(clause);
-    if (!create || /\b(?:do not|don't|never|no need to)\s*$/iu.test(clause.slice(0, create.index))) return false;
-    if (/\b(?:explain|describe|discuss|review)\b/iu.test(clause.slice(0, create.index))) return false;
+    if (!create) return false;
+    const before = clause.slice(0, create.index);
+    if (/\b(?:do not|don['’]t|never|no need to|may|could|can)\b/iu.test(before)) return false;
+    if (/\b(?:explain|describe|discuss|review)\b/iu.test(before)) return false;
     const output = clause.slice(create.index + create[0].length);
     return [...output.matchAll(/\b(?:document|doc)\b/giu)].some(match => {
       const prefix = output.slice(0, match.index);
@@ -101,20 +106,26 @@ export function explicitlyRequestsTaskDocumentOutput(objective: string): boolean
   });
 }
 
-async function hasPublishedTaskDocument(db: Db, binding: {
-  companyId: string; issueId: string; semanticToolReceipts: unknown;
-}): Promise<boolean> {
-  const revisions = new Set(Object.values(record(binding.semanticToolReceipts)).flatMap(value => {
-    const receipt = record(value), result = record(receipt.result), document = record(result.document);
-    return receipt.operationId === "write_document" && ["applied", "duplicate"].includes(String(result.disposition))
-      && typeof document.id === "string" && typeof document.latestRevisionId === "string"
-      ? [`${document.id}/${document.latestRevisionId}`] : [];
-  }));
-  if (!revisions.size) return false;
-  const saved = await db.select({ id: documents.id, revisionId: documents.latestRevisionId })
-    .from(issueDocuments).innerJoin(documents, and(eq(documents.id, issueDocuments.documentId), eq(documents.companyId, binding.companyId)))
+/** Current attached revisions with server-owned publication proof. Joining the
+ * revision to its originating run preserves completed work across continuations
+ * without accepting stale, foreign-task, or provider-invented document refs.
+ */
+export async function publishedTaskDocuments(db: Db, binding: { companyId: string; issueId: string }) {
+  const saved = await db.select({ id: documents.id, revisionId: documents.latestRevisionId,
+    key: issueDocuments.key, resultJson: heartbeatRuns.resultJson })
+    .from(issueDocuments)
+    .innerJoin(documents, and(eq(documents.id, issueDocuments.documentId), eq(documents.companyId, binding.companyId)))
+    .innerJoin(documentRevisions, and(eq(documentRevisions.id, documents.latestRevisionId),
+      eq(documentRevisions.documentId, documents.id), eq(documentRevisions.companyId, binding.companyId)))
+    .innerJoin(heartbeatRuns, and(eq(heartbeatRuns.id, documentRevisions.createdByRunId),
+      eq(heartbeatRuns.companyId, binding.companyId), eq(heartbeatRuns.nativeIssueId, binding.issueId),
+      eq(heartbeatRuns.runtimeMode, "native")))
     .where(and(eq(issueDocuments.companyId, binding.companyId), eq(issueDocuments.issueId, binding.issueId)));
-  return saved.some(document => revisions.has(`${document.id}/${document.revisionId}`));
+  return saved.filter(document => Object.values(record(document.resultJson?.semanticToolReceipts)).some(value => {
+    const receipt = record(value), result = record(receipt.result), published = record(result.document);
+    return receipt.operationId === "write_document" && ["applied", "duplicate"].includes(String(result.disposition))
+      && published.id === document.id && published.latestRevisionId === document.revisionId;
+  })).map(({ id, revisionId, key }) => ({ id, revisionId, key }));
 }
 
 /** Files cited as completed output must be reachable outside the agent workspace. */
@@ -126,7 +137,7 @@ export async function validateNativeDeliverableEvidence(
   if (result.reportedWorkDisposition !== "done") return;
   const fileRequested = explicitlyRequestsFileOutput(binding.objective);
   const taskDocumentRequested = explicitlyRequestsTaskDocumentOutput(binding.objective);
-  const publishedTaskDocument = taskDocumentRequested && await hasPublishedTaskDocument(db, binding);
+  const publishedTaskDocument = taskDocumentRequested && (await publishedTaskDocuments(db, binding)).length > 0;
   const artifactRefs = new Set(evidenceRefs(result.artifacts));
   const refs = new Set([
     ...evidenceRefs(result.evidence),

@@ -54,6 +54,15 @@ describe("explicit task-document output", () => {
     "Create a document about this task in the repository.",
     "Explain how to create a document on this task.",
     "Create briefing.md in the workspace.",
+    "If the lookup succeeds, create a document on this task.",
+    "Create a document on this task if the lookup succeeds.",
+    "Only create a document on this task when the lookup succeeds.",
+    "Unless I decline, create a document on this task.",
+    "Once approved, create a document on this task.",
+    "Do not yet create a document on this task.",
+    "Don’t ever create a document on this task.",
+    "You may optionally create a document on this task.",
+    "Create a document on this task only if useful; otherwise answer inline.",
     "Connect HubSpot so you can read my recent contacts. If the contacts are unavailable, a brief explanation is enough instead of the contact list.",
   ])("preserves other output scopes: %s", objective => {
     expect(explicitlyRequestsTaskDocumentOutput(objective)).toBe(false);

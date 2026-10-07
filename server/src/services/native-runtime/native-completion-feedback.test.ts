@@ -88,6 +88,42 @@ describe("native final-response feedback", () => {
     } });
     await expect(nativeCompletionFeedback(db, value.runId, done)).resolves.toContain("Saved document");
   });
+  it("accepts a still-published document from an earlier run after a response continuation", async () => {
+    const value = await fixture(), continuationRunId = randomUUID();
+    const objective = "Save a document on this task.";
+    await db.update(issues).set({ description: objective }).where(eq(issues.id, value.issueId));
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, value.runId));
+    await db.insert(heartbeatRuns).values({ id: continuationRunId, companyId: value.companyId, agentId: value.agentId,
+      nativeIssueId: value.issueId, status: "running", runtimeMode: "native", resultJson: {},
+      contextSnapshot: { issueId: value.issueId, executionContinuation: { objective } } });
+    await db.update(issues).set({ executionRunId: continuationRunId }).where(eq(issues.id, value.issueId));
+    await expect(nativeCompletionFeedback(db, continuationRunId, done)).resolves.toContain(value.saved.documentHref);
+    // A changed revision without a trusted publication receipt cannot reuse the old proof.
+    await documentService(db).upsertIssueDocument({ format: "markdown", issueId: value.issueId, key: "output", title: "Updated", body: "Replacement revision",
+      baseRevisionId: value.saved.document.latestRevisionId, createdByAgentId: value.agentId, createdByRunId: null });
+    await expect(nativeCompletionFeedback(db, continuationRunId, done)).rejects.toThrow("write_document");
+  });
+  it("rejects publication attributed to a run bound to a different task", async () => {
+    const value = await fixture(), otherIssueId = randomUUID();
+    await db.insert(issues).values({ id: otherIssueId, companyId: value.companyId, title: "Different task", status: "in_progress" });
+    await db.update(issues).set({ description: "Save a document on this task." }).where(eq(issues.id, value.issueId));
+    const finishingRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: finishingRunId, companyId: value.companyId, agentId: value.agentId,
+      nativeIssueId: value.issueId, status: "running", runtimeMode: "native", contextSnapshot: { issueId: value.issueId } });
+    await db.update(issues).set({ executionRunId: finishingRunId }).where(eq(issues.id, value.issueId));
+    // The document remains attached, but its receipt's originating run is not task-scoped.
+    await db.update(heartbeatRuns).set({ nativeIssueId: otherIssueId }).where(eq(heartbeatRuns.id, value.runId));
+    await expect(nativeCompletionFeedback(db, finishingRunId, done)).rejects.toThrow("write_document");
+  });
+  it.each([
+    "If the lookup succeeds, create a document on this task. Otherwise a brief explanation is enough.",
+    "Do not yet create a document on this task; answer inline.",
+  ])("does not invent a mandatory publication for: %s", async (objective) => {
+    const value = await fixture();
+    await db.delete(issueDocuments).where(eq(issueDocuments.issueId, value.issueId));
+    await db.update(issues).set({ description: objective }).where(eq(issues.id, value.issueId));
+    await expect(nativeCompletionFeedback(db, value.runId, done)).resolves.toContain("Completion report accepted");
+  });
   it("does not accept a stale task-document receipt or another task's document", async () => {
     const value = await fixture(), foreign = await fixture();
     await db.update(issues).set({ description: "Save a document on this task." }).where(eq(issues.id, value.issueId));
