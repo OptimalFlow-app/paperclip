@@ -497,19 +497,36 @@ export function installPrivacyApi(state: PrivacyState) {
         if (method === "PATCH") {
           const error = fail("visibility");
           if (error) return error;
-          Object.assign(item, data);
-          if (data.parentId !== undefined) {
-            const parent = state.tasks.find(task => task.id === data.parentId);
-            item.privacyParentIssueId = parent?.id ?? null;
-            item.privacyRootIssueId = parent?.visibility === "private" ? parent.privacyRootIssueId ?? parent.id : item.id;
-            item.ancestors = parent ? [{ ...parent,
+          const next = { ...item, ...data };
+          if (data.visibility !== undefined || data.parentId !== undefined || data.projectId !== undefined) {
+            const project = state.projects.find(project => project.id === next.projectId);
+            if (project?.visibility === "private") {
+              if (data.visibility === "open") {
+                if (!project.personalOwnerUserId) return Response.json({ error: "Move this task out of its private project before making it public" }, { status: 422 });
+                next.projectId = null;
+                next.project = null;
+              } else {
+                next.visibility = "private";
+                next.privacyRootIssueId = item.privacyRootIssueId ?? item.id;
+              }
+            }
+            const parentId = data.parentId !== undefined ? data.parentId : item.privacyParentIssueId;
+            const parent = state.tasks.find(task => task.id === parentId);
+            const parentProject = state.projects.find(project => project.id === parent?.projectId);
+            next.privacyParentIssueId = parent?.id ?? null;
+            if (parent && (parent.visibility === "private" || parentProject?.visibility === "private")) {
+              if (data.visibility === "open") return Response.json({ error: "A task cannot be made public while it inherits private access" }, { status: 422 });
+              next.visibility = "private";
+              next.privacyRootIssueId = parent.privacyRootIssueId ?? parent.id;
+            } else if (data.visibility === "private") next.privacyRootIssueId = item.id;
+            if (data.parentId !== undefined) next.ancestors = parent ? [{ ...parent,
               project: parent.project ? { ...parent.project, workspaces: parent.project.workspaces ?? [], primaryWorkspace: parent.project.primaryWorkspace ?? null } : null,
               goal: parent.goal ?? null,
             }] : [];
           }
-          if (data.projectId !== undefined) {
-            item.project = state.projects.find(project => project.id === data.projectId) ?? null;
-          }
+          if (data.projectId !== undefined && next.projectId) next.project = state.projects.find(project => project.id === next.projectId) ?? null;
+          if (!next.projectId) next.project = null;
+          Object.assign(item, next);
           state.operations.push("Task audience: " + item.visibility);
         }
         return json(item);
