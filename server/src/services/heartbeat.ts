@@ -12245,6 +12245,10 @@ export function heartbeatService(
         ? await getOldestRunForSession(agent.id, sessionId)
         : (runs[runs.length - 1] ?? latestRun);
     const latestRawUsage = readRawUsageTotals(latestRun?.usageJson);
+    // Historical Codex/Gemini raw input includes cache reads. Only add the
+    // separate cache counter when the writer explicitly saved exclusive input.
+    const latestRawInputTokens = (latestRawUsage?.inputTokens ?? 0) +
+      (latestRun?.usageJson?.rawInputIncludesCached === false ? latestRawUsage?.cachedInputTokens ?? 0 : 0);
     const sessionAgeHours =
       latestRun && oldestRun
         ? Math.max(
@@ -12261,10 +12265,10 @@ export function heartbeatService(
     } else if (
       policy.maxRawInputTokens > 0 &&
       latestRawUsage &&
-      latestRawUsage.inputTokens >= policy.maxRawInputTokens
+      latestRawInputTokens >= policy.maxRawInputTokens
     ) {
       reason =
-        `session raw input reached ${formatCount(latestRawUsage.inputTokens)} tokens ` +
+        `session raw input reached ${formatCount(latestRawInputTokens)} tokens ` +
         `(threshold ${formatCount(policy.maxRawInputTokens)})`;
     } else if (
       policy.maxSessionAgeHours > 0 &&
@@ -25625,6 +25629,7 @@ export function heartbeatService(
                 ...(rawUsage
                   ? {
                       rawInputTokens: rawUsage.inputTokens,
+                      rawInputIncludesCached: false,
                       rawCachedInputTokens: rawUsage.cachedInputTokens,
                       rawOutputTokens: rawUsage.outputTokens,
                     }

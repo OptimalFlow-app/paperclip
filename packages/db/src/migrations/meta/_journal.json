@@ -2168,15 +2168,22 @@
     {
       "idx": 311,
       "version": "7",
-      "when": 1791314887097,
-      "tag": "0311_private_task_access",
+      "when": 1791321362665,
+      "tag": "0311_mcp_file_transfers",
       "breakpoints": true
     },
     {
       "idx": 312,
       "version": "7",
-      "when": 1791314887098,
-      "tag": "0312_private_task_draft_assets",
+      "when": 1791336853102,
+      "tag": "0312_private_task_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 313,
+      "version": "7",
+      "when": 1791336854116,
+      "tag": "0313_private_task_draft_assets",
       "breakpoints": true
     }
   ]

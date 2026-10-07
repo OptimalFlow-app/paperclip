@@ -529,7 +529,7 @@ describe("AI repair inside the card", () => {
     completeMock.mockResolvedValue({ ...interaction, status: "accepted" });
     renderBody(interaction); await flush();
     const providerName = provider === "anthropic" ? "Claude" : "OpenAI";
-    expect(document.body.textContent).toContain(`Connect your ${providerName} account`);
+    await waitForAssertion(() => expect(document.body.textContent).toContain(`Connect your ${providerName} account`));
     expect(document.body.textContent).toContain("needs your own AI connection");
     await act(() => button(`Connect ${providerName}`)!.click());
     expect(document.querySelector('[role="dialog"]')).toBeNull();
