@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { createPrivacyState, installPrivacyApi, privacyCompanyId } from "./privateTasks";
+import { createPrivacyState, installPrivacyApi, privacyCompanyId, privacyTask } from "./privateTasks";
 describe("private task creation preview", () => {
   it.each([
     [{ title: "Open task" }, "open", null, null],
@@ -20,7 +20,7 @@ describe("private task creation preview", () => {
 describe("task privacy moves in the preview", () => {
   it.each([
     [{ projectId: "project-private" }, "privacy-root", "privacy-root", null],
-    [{ parentId: "privacy-child" }, "privacy-root", "privacy-root", "privacy-child"],
+    [{ parentId: "privacy-child" }, "privacy-sibling", "privacy-root", "privacy-child"],
   ])("inherits privacy when moving an open task into %j", async (data, id, root, parent) => {
     const restore = installPrivacyApi(createPrivacyState({ visibility: "open" }));
     try {
@@ -50,6 +50,100 @@ describe("task privacy moves in the preview", () => {
     try {
       const response = await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ visibility: "open" }) });
       expect(await response.json()).toMatchObject({ visibility: "open", projectId: null, project: null });
+    } finally { restore(); }
+  });
+});
+
+
+describe("preview descendants and effective access", () => {
+  it.each([
+    { projectId: "project-private" },
+    { parentId: "private-peer" },
+    { visibility: "private" },
+  ])("protects the whole task subtree for %j", async (data) => {
+    const state = createPrivacyState({ visibility: "open", grants: "empty" });
+    for (const task of state.tasks) {
+      task.visibility = "open";
+      task.privacyRootIssueId = null;
+      task.privacyParentIssueId = null;
+    }
+    // Include a provenance-only descendant, as well as ordinary child links.
+    state.tasks[2]!.parentId = null;
+    state.tasks[2]!.privacyParentIssueId = "privacy-child";
+    state.tasks.push(privacyTask({ id: "private-peer", privacyRootIssueId: "private-peer" }));
+    state.tasks.push(privacyTask({ id: "unrelated", visibility: "open", privacyRootIssueId: null }));
+    const restore = installPrivacyApi(state);
+    try {
+      const response = await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify(data) });
+      const root = await response.json();
+      expect(response.status).toBe(200);
+      for (const id of ["privacy-child", "privacy-grandchild", "privacy-sibling"]) {
+        const child = await fetch(`/api/issues/${id}`).then(response => response.json());
+        expect(child).toMatchObject({ visibility: "private", privacyRootIssueId: root.privacyRootIssueId });
+        expect(child.privacyParentIssueId).not.toBeNull();
+      }
+      expect(state.tasks.find(task => task.id === "unrelated")?.visibility).toBe("open");
+    } finally { restore(); }
+  });
+  it("drops former personal-project members after publishing and making the task private again", async () => {
+    const restore = installPrivacyApi(createPrivacyState({ taskProject: true, personal: true, grants: "empty" }));
+    try {
+      const grants = () => fetch("/api/issues/privacy-root/access-grants").then(response => response.json());
+      expect(await grants()).toContainEqual(expect.objectContaining({ subjectId: "user-product", source: "project" }));
+      const published = await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ visibility: "open" }) }).then(response => response.json());
+      expect(published).toMatchObject({ projectId: null, privacyRootIssueId: null });
+      await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ visibility: "private" }) });
+      expect(await grants()).not.toContainEqual(expect.objectContaining({ source: "project" }));
+    } finally { restore(); }
+  });
+  it("removes inherited project membership after detaching from its parent", async () => {
+    const restore = installPrivacyApi(createPrivacyState({ taskProject: true, grants: "empty" }));
+    try {
+      const grants = () => fetch("/api/issues/privacy-child/access-grants").then(response => response.json());
+      expect(await grants()).toContainEqual(expect.objectContaining({ subjectId: "user-product", source: "project" }));
+      await fetch("/api/issues/privacy-child", { method: "PATCH", body: JSON.stringify({ parentId: null }) });
+      expect(await grants()).not.toContainEqual(expect.objectContaining({ source: "project" }));
+    } finally { restore(); }
+  });
+  it("shows a child share only on that child and its descendants", async () => {
+    const restore = installPrivacyApi(createPrivacyState({ grants: "empty" }));
+    try {
+      await fetch("/api/issues/privacy-child/access-grants", { method: "POST", body: JSON.stringify({ subjectType: "user", subjectId: "user-product" }) });
+      for (const [id, expected] of [["privacy-root", false], ["privacy-child", true], ["privacy-grandchild", true], ["privacy-sibling", false]] as const) {
+        const grants = await fetch(`/api/issues/${id}/access-grants`).then(response => response.json());
+        expect(grants.some((grant: { subjectId: string }) => grant.subjectId === "user-product")).toBe(expected);
+        if (id === "privacy-grandchild") expect(grants).toContainEqual(expect.objectContaining({ inherited: true, issueId: "privacy-child" }));
+      }
+    } finally { restore(); }
+  });
+  it("protects descendants when a project becomes private and keeps tasks private after opening it", async () => {
+    const state = createPrivacyState({ visibility: "open", taskProject: true, grants: "empty" });
+    state.projects[0]!.visibility = "open";
+    for (const task of state.tasks) { task.visibility = "open"; task.privacyRootIssueId = null; }
+    const restore = installPrivacyApi(state);
+    try {
+      await fetch("/api/projects/project-private", { method: "PATCH", body: JSON.stringify({ visibility: "private" }) });
+      expect(state.tasks.every(task => task.visibility === "private" && task.privacyRootIssueId !== null)).toBe(true);
+      await fetch("/api/projects/project-private", { method: "PATCH", body: JSON.stringify({ visibility: "open" }) });
+      expect(state.tasks.every(task => task.visibility === "private")).toBe(true);
+      const grants = await fetch("/api/issues/privacy-root/access-grants").then(response => response.json());
+      expect(grants).not.toContainEqual(expect.objectContaining({ source: "project" }));
+    } finally { restore(); }
+  });
+  it("keeps existing private descendants private when their parent is published", async () => {
+    const state = createPrivacyState(); const restore = installPrivacyApi(state);
+    try {
+      await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ visibility: "open" }) });
+      expect(state.tasks[0]).toMatchObject({ visibility: "open", privacyRootIssueId: null });
+      expect(state.tasks.slice(1).every(task => task.visibility === "private")).toBe(true);
+    } finally { restore(); }
+  });
+  it("does not revoke an ancestor grant through the child's endpoint", async () => {
+    const state = createPrivacyState(); const restore = installPrivacyApi(state);
+    try {
+      const response = await fetch("/api/issues/privacy-child/access-grants/grant-morgan/revoke", { method: "POST", body: "{}" });
+      expect(response.status).toBe(404);
+      expect(state.grants.find(grant => grant.id === "grant-morgan")?.revokedAt).toBeNull();
     } finally { restore(); }
   });
 });

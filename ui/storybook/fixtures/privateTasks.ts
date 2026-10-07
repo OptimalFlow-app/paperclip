@@ -367,6 +367,33 @@ export function installPrivacyApi(state: PrivacyState) {
         { once: true },
       );
     });
+  const privateTaskScope = (task: Issue) => task.visibility === "private"
+    || state.projects.some(project => project.id === task.projectId && project.visibility === "private");
+  const privacyAncestry = (task: Issue) => {
+    const ancestry = [task];
+    const seen = new Set([task.id]);
+    let parent = state.tasks.find(row => row.id === task.privacyParentIssueId);
+    while (parent && !seen.has(parent.id) && privateTaskScope(parent)) {
+      ancestry.push(parent);
+      seen.add(parent.id);
+      parent = state.tasks.find(row => row.id === parent!.privacyParentIssueId);
+    }
+    return ancestry;
+  };
+  const privacySubtree = (roots: string[]) => {
+    const seen = new Set(roots);
+    const pending = [...roots];
+    while (pending.length) {
+      const parentId = pending.shift()!;
+      for (const task of state.tasks) {
+        if (!seen.has(task.id) && (task.parentId === parentId || task.privacyParentIssueId === parentId)) {
+          seen.add(task.id);
+          pending.push(task.id);
+        }
+      }
+    }
+    return state.tasks.filter(task => seen.has(task.id));
+  };
   window.fetch = async (input, init) => {
     const request = input instanceof Request ? input : null;
     const url = new URL(
@@ -498,7 +525,9 @@ export function installPrivacyApi(state: PrivacyState) {
           const error = fail("visibility");
           if (error) return error;
           const next = { ...item, ...data };
-          if (data.visibility !== undefined || data.parentId !== undefined || data.projectId !== undefined) {
+          const changesPrivacy = data.visibility !== undefined || data.parentId !== undefined || data.projectId !== undefined;
+          if (data.visibility === "open") next.privacyRootIssueId = null;
+          if (changesPrivacy) {
             const project = state.projects.find(project => project.id === next.projectId);
             if (project?.visibility === "private") {
               if (data.visibility === "open") {
@@ -527,6 +556,14 @@ export function installPrivacyApi(state: PrivacyState) {
           if (data.projectId !== undefined && next.projectId) next.project = state.projects.find(project => project.id === next.projectId) ?? null;
           if (!next.projectId) next.project = null;
           Object.assign(item, next);
+          if (changesPrivacy && item.visibility === "private") {
+            for (const descendant of privacySubtree([item.id])) {
+              if (descendant.id === item.id) continue;
+              descendant.visibility = "private";
+              descendant.privacyRootIssueId = item.privacyRootIssueId ?? item.id;
+              descendant.privacyParentIssueId ??= descendant.parentId;
+            }
+          }
           state.operations.push("Task audience: " + item.visibility);
         }
         return json(item);
@@ -544,18 +581,24 @@ export function installPrivacyApi(state: PrivacyState) {
         });
       }
       if (resource === "access-grants") {
-        if (method === "GET")
-          return state.options.loading === "grants"
-            ? pause(init?.signal)
-            : (fail("grants") ?? json([
-              ...state.grants.filter(grant => !state.options.taskProject || grant.source !== "project"),
-              ...(state.options.taskProject && state.projects[0]?.visibility === "private"
-                ? state.members.filter(member => member.subjectId !== privacyOwnerId).map(member => privacyGrant({
-                    id: "project-" + member.id, issueId: item.id, subjectType: member.subjectType,
-                    subjectId: member.subjectId, subjectDisplayName: member.subjectDisplayName,
-                    source: "project", inherited: true,
-                  })) : []),
-            ]));
+        if (method === "GET") {
+          if (state.options.loading === "grants") return pause(init?.signal);
+          const error = fail("grants"); if (error) return error;
+          const ancestry = privacyAncestry(item);
+          const taskIds = new Set(ancestry.map(task => task.id));
+          const projectIds = new Set(ancestry.flatMap(task => state.projects
+            .filter(project => project.id === task.projectId && project.visibility === "private").map(project => project.id)));
+          return json([
+            ...state.grants.filter(grant => grant.source !== "project" && taskIds.has(grant.issueId))
+              .map(grant => ({ ...grant, inherited: grant.issueId !== item.id })),
+            ...state.members.filter(member => projectIds.has(member.projectId) && member.subjectId !== privacyOwnerId)
+              .map(member => privacyGrant({
+                id: "project-" + member.id, issueId: item.id, subjectType: member.subjectType,
+                subjectId: member.subjectId, subjectDisplayName: member.subjectDisplayName,
+                source: "project", inherited: true,
+              })),
+          ]);
+        }
         const error = fail("add");
         if (error) return error;
         const subject = [...privacyUsers, ...privacyAgents].find(
@@ -577,9 +620,10 @@ export function installPrivacyApi(state: PrivacyState) {
         const error = fail("revoke");
         if (error) return error;
         const grant = state.grants.find(
-          (row) => row.id === resource.split("/")[1],
+          (row) => row.id === resource.split("/")[1] && row.issueId === item.id && row.revokedAt === null,
         );
-        if (grant) grant.revokedAt = new Date();
+        if (!grant) return jsonError404();
+        grant.revokedAt = new Date();
         state.operations.push("Removed a saved task grant");
         return json(grant);
       }
@@ -619,14 +663,23 @@ export function installPrivacyApi(state: PrivacyState) {
       );
       if (!project) return jsonError404();
       if (!projectMatch[2]) {
-        if (method === "PATCH") Object.assign(project, data);
+        if (method === "PATCH") {
+          Object.assign(project, data);
+          if (data.visibility === "private") {
+            for (const task of privacySubtree(state.tasks.filter(task => task.projectId === project.id).map(task => task.id))) {
+              task.visibility = "private";
+              task.privacyRootIssueId ??= task.id;
+              task.privacyParentIssueId ??= task.parentId;
+            }
+          }
+        }
         return json(project);
       }
       if (projectMatch[2] === "access-members") {
         if (method === "GET")
           return state.options.loading === "members"
             ? pause(init?.signal)
-            : (fail("members") ?? json(state.members));
+            : (fail("members") ?? json(state.members.filter(member => member.projectId === project.id)));
         const error = fail("project-add");
         if (error) return error;
         const subject = [...privacyUsers, ...privacyAgents].find(
@@ -648,7 +701,7 @@ export function installPrivacyApi(state: PrivacyState) {
         const error = fail("project-remove");
         if (error) return error;
         const id = projectMatch[2].split("/")[1];
-        state.members = state.members.filter((row) => row.id !== id);
+        state.members = state.members.filter((row) => row.id !== id || row.projectId !== project.id);
         return json({ id });
       }
       return json([]);

@@ -76,7 +76,7 @@ const meta = {
 } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
-export const AllAccessSources: Story = {};
+export const AllAccessSources: Story = { parameters: { privacy: { taskProject: true } } };
 export const OwnerAndCurrentAssignee: Story = {
   render: () => <Sharing implicit />,
 };
@@ -96,6 +96,7 @@ export const ReadOnlyMember: Story = {
 };
 export const InheritedAccess: Story = {
   parameters: { privacy: { grants: "inherited" } },
+  render: () => <Sharing child />,
 };
 export const StickyAssignmentAfterUnassignment: Story = {
   parameters: { privacy: { grants: "assignment" } },
