@@ -4,6 +4,7 @@ import { expect, userEvent, within, waitFor } from "storybook/test";
 import { Route, Routes, useNavigate } from "@/lib/router";
 import { Layout } from "@/components/Layout";
 import { IssueDetail } from "@/pages/IssueDetail";
+import { Issues } from "@/pages/Issues";
 import { Projects } from "@/pages/Projects";
 import { DesignGuide } from "@/pages/DesignGuide";
 import { PluginLauncherProvider } from "@/plugins/launchers";
@@ -13,27 +14,30 @@ export function PrivacyPage({
   child = false,
   guide = false,
   projects = false,
+  tasks = false,
 }: {
   child?: boolean;
   guide?: boolean;
   projects?: boolean;
+  tasks?: boolean;
 }) {
   const navigate = useNavigate();
   const [ready, setReady] = useState(false);
   useEffect(() => {
     navigate(
-      projects ? "/PAP/projects" : guide
+      tasks ? "/PAP/issues" : projects ? "/PAP/projects" : guide
         ? "/PAP/design-guide"
         : `/PAP/issues/${child ? "PAP-411" : "PAP-410"}`,
       { replace: true },
     );
     setReady(true);
-  }, [navigate, child, guide, projects]);
+  }, [navigate, child, guide, projects, tasks]);
   if (!ready) return null;
   return (
     <PluginLauncherProvider>
       <Routes>
         <Route path="/:companyPrefix" element={<Layout />}>
+          <Route path="issues" element={<Issues />} />
           <Route path="issues/:issueId" element={<IssueDetail />} />
           <Route path="projects" element={<Projects />} />
           <Route path="design-guide" element={<DesignGuide />} />

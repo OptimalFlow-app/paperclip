@@ -26,6 +26,7 @@ export type PrivacyScenario = {
   visibility?: "open" | "private";
   grants?: "all" | "empty" | "assignment" | "inherited" | "long";
   failure?:
+    | "parent"
     | "grants"
     | "directory"
     | "add"
@@ -35,7 +36,7 @@ export type PrivacyScenario = {
     | "create"
     | "project-add"
     | "project-remove";
-  loading?: "grants" | "members" | "mention";
+  loading?: "parent" | "grants" | "members" | "mention";
   retryOnce?: boolean;
   childOnly?: boolean;
   personal?: boolean;
@@ -476,6 +477,11 @@ export function installPrivacyApi(state: PrivacyState) {
       )
         return jsonError404();
       if (!resource) {
+        if (method === "GET" && issueMatch[1] === "privacy-root") {
+          if (state.options.loading === "parent") return pause(init?.signal);
+          const error = fail("parent");
+          if (error) return error;
+        }
         if (method === "PATCH") {
           const error = fail("visibility");
           if (error) return error;

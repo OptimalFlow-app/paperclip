@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 
 const surfaces = [
   ["ComposerAddMenu · ComposerPrivacyChip · TaskChatComposer", "Changed", "01 Creation", "privacy-in-plus-menu", "Private task under +, selected lock chip, removal, inherited parent/project restrictions, desktop and mobile."],
-  ["AccessSelectIdentity", "Added", "02 Sharing", "search-people-and-agents", "Shared rendering of human pictures or initials and agent character avatars in task and project sharing results and selected values."],
+  ["Identity · AccessSelectIdentity", "Added", "02 Sharing", "search-people-and-agents", "Shared rendering of human pictures or initials and agent character avatars in task and project sharing results and selected values."],
   ["SidebarProjects · SidebarStarredProjects · production variant · Projects", "Changed", "06 Full product pages", "private-projects-in-navigation", "Right-side locks in actual navigation and project rows, current and classic shells, mobile."],
 
   [
@@ -10,7 +10,7 @@ const surfaces = [
     "Changed",
     "01 Creation",
     "open-by-default",
-    "Open and private creation; inherited child; private/personal project; restored draft; submit failure; mobile/light.",
+    "Open and private creation; unresolved parent access; lookup failure and retry; inherited child; private/personal project; restored draft; submit failure; mobile/light.",
   ],
   [
     "IssueShareSheet",

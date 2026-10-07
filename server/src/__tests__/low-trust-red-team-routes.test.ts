@@ -1734,7 +1734,7 @@ describeEmbeddedPostgres(
         const before = await snapshot(db);
         const res = await attempt.req();
         expect(res.status, `${attempt.id}: ${JSON.stringify(res.body)}`).toBe(
-          ["LT approvals", "LT-15/16", "LT-19", "LT-26 child", "LT-26 company issue", "LT-26 interaction", "LT-06 resume", "LT-06 blocker mutation"].includes(attempt.id) ? 403 : 404,
+          ["LT approvals", "LT-15/16", "LT-19", "LT-26 child", "LT-26 child with unauthorized assignee", "LT-26 company issue", "LT-26 interaction", "LT-06 resume", "LT-06 blocker mutation"].includes(attempt.id) ? 403 : 404,
         );
         expectNoCanary(res.body, ...forbiddenMarkers);
         const after = await snapshot(db);

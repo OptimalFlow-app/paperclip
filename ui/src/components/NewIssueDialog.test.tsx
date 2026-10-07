@@ -710,6 +710,40 @@ describe("NewIssueDialog", () => {
     act(() => root.unmount());
   });
 
+  it("waits for parent access before offering privacy or creating a child", async () => {
+    let resolveParent!: (value: unknown) => void;
+    mockIssuesApi.get.mockReturnValue(new Promise(resolve => { resolveParent = resolve; }));
+    dialogState.newIssueDefaults = { parentId: "issue-1", title: "Private child" };
+    const { root } = renderDialog(container);
+    await flush();
+    const submit = container.querySelector<HTMLButtonElement>('button[aria-label="Create sub-task"]')!;
+    expect(submit.disabled).toBe(true);
+    expect(container.textContent).toContain("Checking parent access");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="task-chat-composer-add"]')!.click());
+    await flush();
+    expect(document.querySelector('[data-testid="composer-add-private"]')).toBeNull();
+    expect(mockIssuesApi.create).not.toHaveBeenCalled();
+    await act(async () => resolveParent({ id: "issue-1", visibility: "private" }));
+    await flush();
+    await waitForAssertion(() => expect(container.querySelector<HTMLButtonElement>('[data-testid="composer-private-chip"]')?.disabled).toBe(true));
+    expect(submit.disabled).toBe(false);
+    act(() => root.unmount());
+  });
+
+  it("keeps submission blocked after a parent lookup error and lets the user retry", async () => {
+    mockIssuesApi.get.mockRejectedValueOnce(new Error("Unavailable")).mockResolvedValue({ id: "issue-1", visibility: "private" });
+    dialogState.newIssueDefaults = { parentId: "issue-1", title: "Private child" };
+    const { root } = renderDialog(container);
+    await flush();
+    await waitForAssertion(() => expect(container.textContent).toContain("Couldn't check parent access."));
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="Create sub-task"]')?.disabled).toBe(true);
+    await act(async () => Array.from(container.querySelectorAll('button')).find(button => button.textContent === "Retry")!.click());
+    await flush();
+    await waitForAssertion(() => expect(container.querySelector<HTMLButtonElement>('[data-testid="composer-private-chip"]')?.disabled).toBe(true));
+    expect(mockIssuesApi.create).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
   it("locks inherited privacy and submits the child as private", async () => {
     mockIssuesApi.get.mockResolvedValue({ id: "issue-1", visibility: "private" });
     dialogState.newIssueDefaults = { parentId: "issue-1", title: "Private child" };

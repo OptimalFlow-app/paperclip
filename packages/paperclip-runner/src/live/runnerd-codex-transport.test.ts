@@ -7571,14 +7571,6 @@ it("preserves prepared input and completion feedback through runnerd and the rea
   `], { maxBuffer: 16 * 1024 * 1024 });
   await writeFile(proxy, proxyBytes, { mode: 0o755 });
   const digest = (file: string) => `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
-  // Linux runner images can install Node with group-write permission. Qualify
-  // an isolated copy without mutating the host. Keep the original on macOS,
-  // where Homebrew Node can load dylibs relative to its installation directory.
-  const providerNode = process.platform === "linux" ? join(root, "node") : process.execPath;
-  if (providerNode !== process.execPath) {
-    await cp(process.execPath, providerNode);
-    await chmod(providerNode, 0o755);
-  }
   const runtime = join(root, "opencode");
   const bundle = createCapabilityRunnerdCodexTransport({
     provider: "opencode",

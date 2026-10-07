@@ -120,8 +120,8 @@ function PrincipalAvatar({
   initials?: string | null;
 }) {
   return (
-    <Avatar size="sm" className="mt-0.5">
-      {avatarUrl ? <AvatarImage src={avatarUrl} alt={displayName} /> : null}
+    <Avatar size="sm" className="mt-0.5" aria-hidden="true">
+      {avatarUrl ? <AvatarImage src={avatarUrl} alt="" /> : null}
       <AvatarFallback>{initials ?? displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
     </Avatar>
   );

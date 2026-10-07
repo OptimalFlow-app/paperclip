@@ -390,11 +390,13 @@ export function NewIssueDialog() {
     retry: false,
   });
 
-  const { data: privacyParent } = useQuery({
+  const { data: privacyParent, isError: parentPrivacyError, refetch: refetchParentPrivacy } = useQuery({
     queryKey: queryKeys.issues.detail(newIssueDefaults.parentId ?? ""),
     queryFn: () => issuesApi.get(newIssueDefaults.parentId!),
     enabled: newIssueOpen && Boolean(newIssueDefaults.parentId),
+    retry: false,
   });
+  const parentPrivacyUnresolved = isSubIssueMode && !privacyParent;
   const inheritsPrivateAccess = privacyParent?.visibility === "private" || privacyParent?.project?.visibility === "private";
   const effectivePrivate = isPrivate || inheritsPrivateAccess
     || orderedProjects.some(project => project.id === projectId && project.visibility === "private");
@@ -783,7 +785,7 @@ export function NewIssueDialog() {
   async function handleSubmit(body: string, mode: IssueWorkMode, settings: ComposerRunSettings | null) {
     const currentTitle = titleRef.current.trim();
     const currentDescription = body.trim();
-    if (!effectiveCompanyId || (!currentTitle && !currentDescription) || createIssue.isPending || worktreeSelectionIncomplete) return;
+    if (!effectiveCompanyId || (!currentTitle && !currentDescription) || createIssue.isPending || worktreeSelectionIncomplete || parentPrivacyUnresolved) return;
     const inheritedOverrides = buildAssigneeAdapterOverrides({
       adapterType: assigneeAdapterType,
       lane: assigneeChrome ? "custom" : assigneeModelLane,
@@ -1173,7 +1175,7 @@ export function NewIssueDialog() {
                 value: description,
                 onChange: handleDescriptionChange,
                 onSubmit: handleSubmit,
-                privacy: {
+                privacy: parentPrivacyUnresolved ? undefined : {
                   private: effectivePrivate,
                   inherited: inheritsPrivateAccess ? "Inherited from parent" : !isPrivate && currentProject?.visibility === "private" ? "Inherited from project" : undefined,
                   onChange: (checked) => {
@@ -1224,6 +1226,12 @@ export function NewIssueDialog() {
                   ) : undefined,
                 details: (
                   <>
+                    {parentPrivacyUnresolved ? (
+                      <div role={parentPrivacyError ? "alert" : "status"} className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+                        <span>{parentPrivacyError ? "Couldn't check parent access." : "Checking parent access…"}</span>
+                        {parentPrivacyError ? <Button variant="ghost" size="sm" onClick={() => void refetchParentPrivacy()}>Retry</Button> : null}
+                      </div>
+                    ) : null}
                     {worktreeSelectionIncomplete && !worktreesLoading ? (
                       <p role="alert" className="mb-2 text-xs text-destructive">
                         {worktreesError ? "Couldn't check the selected worktree. Retry in Worktrees or choose New worktree."
@@ -1363,7 +1371,7 @@ export function NewIssueDialog() {
                     ) : null}
                   </>
                 ),
-                submitDisabled: worktreeSelectionIncomplete,
+                submitDisabled: worktreeSelectionIncomplete || parentPrivacyUnresolved,
                 contextBar: (
                   <>
                     <InlineEntitySelector

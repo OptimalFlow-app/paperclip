@@ -46,7 +46,7 @@ function Creation({
   useEffect(() => {
     open();
   }, [parent, project, draft, taskTitle]);
-  return <PrivacyPage />;
+  return <PrivacyPage tasks />;
 }
 const meta = {
   title: "Private tasks/01 Creation",
@@ -126,3 +126,35 @@ export const LightPrivateDraft: Story = {
   parameters: { privacy: { draft: true } },
   render: () => <Creation draft />,
 };
+
+export const ParentAccessLoading: Story = {
+  parameters: { privacy: { loading: "parent" } },
+  render: (args) => <Creation {...args} parent />,
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await expect(await page.findByText("Checking parent access…")).toBeVisible();
+    await expect(await page.findByRole("button", { name: "Create sub-task" })).toBeDisabled();
+    await userEvent.click(await page.findByRole("button", { name: "Add to composer" }));
+    await expect(page.queryByTestId("composer-add-private")).not.toBeInTheDocument();
+  },
+};
+export const ParentAccessUnavailable: Story = {
+  parameters: { privacy: { failure: "parent" } },
+  render: (args) => <Creation {...args} parent />,
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await expect(await page.findByText("Couldn't check parent access.")).toBeVisible();
+    await expect(await page.findByRole("button", { name: "Create sub-task" })).toBeDisabled();
+  },
+};
+export const RetryParentAccess: Story = {
+  parameters: { privacy: { failure: "parent", retryOnce: true } },
+  render: (args) => <Creation {...args} parent />,
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body);
+    await userEvent.click(await page.findByRole("button", { name: "Retry" }));
+    await expect(await page.findByRole("button", { name: "Private task" })).toBeDisabled();
+    await expect(await page.findByRole("button", { name: "Create sub-task" })).toBeEnabled();
+  },
+};
+export const MobileParentAccessUnavailable: Story = { ...ParentAccessUnavailable, globals: mobile };
