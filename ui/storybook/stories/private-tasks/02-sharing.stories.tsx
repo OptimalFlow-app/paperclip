@@ -222,7 +222,8 @@ export const AddDirectGrantAlongsideInheritedAccess: Story = {
     await userEvent.click(await page.findByRole("option", { name: "Morgan Reed" }));
     await userEvent.click(page.getByRole("button", { name: "Add" }));
     await page.findByText("Access granted");
-    await expect(await page.findByRole("button", { name: "Revoke" })).toBeEnabled();
+    await waitFor(() => expect(page.getAllByText("Morgan Reed")).toHaveLength(2));
+    await expect((await page.findAllByRole("button", { name: "Revoke" }))[0]!).toBeEnabled();
   },
 };
 export const MobileIndependentChildGrant: Story = { ...AddDirectGrantAlongsideInheritedAccess, globals: mobile };

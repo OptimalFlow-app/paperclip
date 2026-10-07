@@ -186,6 +186,30 @@ export function privacyGrant(
   };
 }
 
+function privacySubjectMetadata(subjectType: IssueAccessGrant["subjectType"], subjectId: string): Pick<IssueAccessGrant, "subjectDisplayName" | "subjectInitials" | "agentVisibility"> {
+  const subject = (subjectType === "user" ? privacyUsers : privacyAgents).find(row => row.id === subjectId);
+  const name = subject?.name ?? "Unknown";
+  return {
+    subjectDisplayName: name,
+    subjectInitials: name.split(" ").map(part => part[0]).join("").slice(0, 2),
+    agentVisibility: subjectType === "agent" ? subjectId === "agent-dedicated" ? "private"
+      : subjectId === "agent-shared" ? "discoverable" : null : null,
+  };
+}
+function savePrivacyAssignments(tasks: Issue[], grants: IssueAccessGrant[]) {
+  for (const task of tasks) {
+    if (task.visibility !== "private") continue;
+    for (const [subjectType, subjectId] of [["agent", task.assigneeAgentId], ["user", task.assigneeUserId]] as const) {
+      if (!subjectId || grants.some(grant => grant.issueId === task.id && grant.subjectType === subjectType
+        && grant.subjectId === subjectId && grant.revokedAt === null && grant.source !== "owner" && grant.source !== "project")) continue;
+      grants.push(privacyGrant({
+        ...privacySubjectMetadata(subjectType, subjectId),
+        id: `assignment-${task.id}-${subjectType}-${subjectId}-${grants.length}`,
+        issueId: task.id, subjectType, subjectId, source: "assignment",
+      }));
+    }
+  }
+}
 export function createPrivacyState(options: PrivacyScenario = {}) {
   const role = options.role ?? "owner";
   const user = privacyUsers.find(
@@ -242,13 +266,6 @@ export function createPrivacyState(options: PrivacyScenario = {}) {
       { id: "privacy-root", identifier: "PAP-410", locked: true },
     ] as unknown as Issue["ancestors"]; // Redacted wire shape; never invent a private title for the legacy ancestor type.
   let grants = [
-    privacyGrant({
-      id: "grant-owner",
-      subjectId: privacyOwnerId,
-      subjectDisplayName: "Avery Chen",
-      subjectInitials: "AC",
-      source: "owner",
-    }),
     privacyGrant(),
     privacyGrant({
       id: "grant-assignment",
@@ -258,14 +275,6 @@ export function createPrivacyState(options: PrivacyScenario = {}) {
       subjectInitials: "EA",
       source: "assignment",
       agentVisibility: "private",
-    }),
-    privacyGrant({
-      id: "grant-project",
-      subjectId: "user-finance",
-      subjectDisplayName: "Sam Rivera",
-      subjectInitials: "SR",
-      source: "project",
-      inherited: true,
     }),
   ];
   if (options.grants === "empty") grants = [];
@@ -283,6 +292,10 @@ export function createPrivacyState(options: PrivacyScenario = {}) {
         subjectInitials: "MR",
       }),
     ];
+  if (options.grants === "empty") {
+    for (const task of tasks) { task.assigneeAgentId = null; task.assigneeUserId = null; }
+  }
+  savePrivacyAssignments(tasks, grants);
   const members: ProjectAccessMember[] = privacyUsers
     .slice(0, 2)
     .map((item) => ({
@@ -467,9 +480,13 @@ export function installPrivacyApi(state: PrivacyState) {
             : null,
           id: "privacy-created",
           identifier: "PAP-414",
+          assigneeAgentId: data.assigneeAgentId ?? null,
+          assigneeUserId: data.assigneeUserId ?? null,
+          project: project ?? null,
           responsibleUserId: privacyOwnerId,
         });
         state.tasks.push(issue);
+        savePrivacyAssignments([issue], state.grants);
         state.operations.push(
           "Created " + issue.identifier + " · " + issue.visibility,
         );
@@ -564,6 +581,7 @@ export function installPrivacyApi(state: PrivacyState) {
               descendant.privacyParentIssueId ??= descendant.parentId;
             }
           }
+          savePrivacyAssignments(item.visibility === "private" && changesPrivacy ? privacySubtree([item.id]) : [item], state.grants);
           state.operations.push("Task audience: " + item.visibility);
         }
         return json(item);
@@ -589,10 +607,19 @@ export function installPrivacyApi(state: PrivacyState) {
           const projectIds = new Set(ancestry.flatMap(task => state.projects
             .filter(project => project.id === task.projectId && project.visibility === "private").map(project => project.id)));
           return json([
-            ...state.grants.filter(grant => grant.source !== "project" && taskIds.has(grant.issueId))
+            ...state.grants.filter(grant => grant.source !== "project" && grant.source !== "owner" && taskIds.has(grant.issueId))
               .map(grant => ({ ...grant, inherited: grant.issueId !== item.id })),
-            ...state.members.filter(member => projectIds.has(member.projectId) && member.subjectId !== privacyOwnerId)
+            ...ancestry.flatMap(task => Array.from(new Set([task.responsibleUserId, task.createdByUserId]
+              .filter((id): id is string => Boolean(id)))).map(subjectId => {
+                return privacyGrant({
+                  ...privacySubjectMetadata("user", subjectId),
+                  id: `owner:${task.id}:${subjectId}`, issueId: task.id, subjectId, source: "owner",
+                  inherited: task.id !== item.id,
+                });
+              })),
+            ...state.members.filter(member => projectIds.has(member.projectId))
               .map(member => privacyGrant({
+                ...privacySubjectMetadata(member.subjectType, member.subjectId),
                 id: "project-" + member.id, issueId: item.id, subjectType: member.subjectType,
                 subjectId: member.subjectId, subjectDisplayName: member.subjectDisplayName,
                 source: "project", inherited: true,
@@ -606,6 +633,7 @@ export function installPrivacyApi(state: PrivacyState) {
         );
         const grant = privacyGrant({
           ...data,
+          ...privacySubjectMetadata(data.subjectType, data.subjectId),
           id: "grant-added-" + data.subjectId,
           issueId: item.id,
           subjectDisplayName: subject?.name ?? "Unknown",
@@ -671,6 +699,7 @@ export function installPrivacyApi(state: PrivacyState) {
               task.privacyRootIssueId ??= task.id;
               task.privacyParentIssueId ??= task.parentId;
             }
+            savePrivacyAssignments(privacySubtree(state.tasks.filter(task => task.projectId === project.id).map(task => task.id)), state.grants);
           }
         }
         return json(project);

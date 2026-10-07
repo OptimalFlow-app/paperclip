@@ -51,9 +51,8 @@ export const CeoSharesOnlyChild: Story = {
   play: async ({ canvasElement, step }) => {
     const page = within(canvasElement.ownerDocument.body);
     await step("Review the selected person", async () => {
-      await expect(
-        await page.findByRole("dialog", { name: "Who can access this task" }),
-      ).toHaveTextContent("Morgan Reed");
+      const dialog = await page.findByRole("dialog", { name: "Who can access this task" });
+      await waitFor(() => expect(dialog).toHaveTextContent("Morgan Reed"));
     });
     await step("Share the research child with Morgan", async () => {
       await userEvent.keyboard("{Escape}");
@@ -119,9 +118,8 @@ export const OwnerMakesTaskPublic: Story = {
   play: async ({ canvasElement, step }) => {
     const page = within(canvasElement.ownerDocument.body);
     await step("Review disclosure before changing the audience", async () => {
-      await userEvent.click(
-        await page.findByRole("button", { name: "Make public" }),
-      );
+      await waitFor(() => expect(page.getByRole("button", { name: "Make public" })).toBeEnabled());
+      await userEvent.click(page.getByRole("button", { name: "Make public" }));
       await expect(await page.findByRole("alertdialog")).toHaveTextContent(
         "Existing private subtasks keep their privacy",
       );

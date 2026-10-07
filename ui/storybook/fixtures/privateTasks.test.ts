@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { createPrivacyState, installPrivacyApi, privacyCompanyId, privacyTask } from "./privateTasks";
+import { createPrivacyState, installPrivacyApi, privacyCompanyId, privacyTask, privacyGrant } from "./privateTasks";
 describe("private task creation preview", () => {
   it.each([
     [{ title: "Open task" }, "open", null, null],
@@ -144,6 +144,57 @@ describe("preview descendants and effective access", () => {
       const response = await fetch("/api/issues/privacy-child/access-grants/grant-morgan/revoke", { method: "POST", body: "{}" });
       expect(response.status).toBe(404);
       expect(state.grants.find(grant => grant.id === "grant-morgan")?.revokedAt).toBeNull();
+    } finally { restore(); }
+  });
+});
+
+
+describe("preview owner and saved assignment access", () => {
+  it("keeps a child's own owner and assignment reasons after its parent becomes public", async () => {
+    const state = createPrivacyState();
+    state.tasks[1]!.responsibleUserId = "user-product";
+    state.tasks[1]!.createdByUserId = "user-finance";
+    const restore = installPrivacyApi(state);
+    try {
+      await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ visibility: "open" }) });
+      const grants = await fetch("/api/issues/privacy-child/access-grants").then(response => response.json());
+      for (const subjectId of ["user-product", "user-finance"]) expect(grants).toContainEqual(expect.objectContaining({ issueId: "privacy-child", subjectId, source: "owner", inherited: false }));
+      expect(grants).toContainEqual(expect.objectContaining({ issueId: "privacy-child", subjectId: "agent-dedicated", source: "assignment", inherited: false }));
+      expect(grants.every((grant: { issueId: string }) => grant.issueId === "privacy-child")).toBe(true);
+    } finally { restore(); }
+  });
+  it("saves assignment access when a project becomes private and retains it after unassignment", async () => {
+    const state = createPrivacyState({ visibility: "open", taskProject: true });
+    state.projects[0]!.visibility = "open";
+    for (const task of state.tasks) { task.visibility = "open"; task.privacyRootIssueId = null; }
+    state.grants = [];
+    const restore = installPrivacyApi(state);
+    try {
+      await fetch("/api/projects/project-private", { method: "PATCH", body: JSON.stringify({ visibility: "private" }) });
+      await fetch("/api/issues/privacy-child", { method: "PATCH", body: JSON.stringify({ assigneeAgentId: null }) });
+      await fetch("/api/projects/project-private", { method: "PATCH", body: JSON.stringify({ visibility: "open" }) });
+      const grants = await fetch("/api/issues/privacy-child/access-grants").then(response => response.json());
+      expect(grants).toContainEqual(expect.objectContaining({ issueId: "privacy-child", subjectId: "agent-dedicated", source: "assignment", inherited: false }));
+      expect(grants).not.toContainEqual(expect.objectContaining({ source: "project" }));
+    } finally { restore(); }
+  });
+  it("does not add an assignment grant beside an existing independent direct grant", async () => {
+    const state = createPrivacyState({ grants: "empty" });
+    state.tasks[0]!.assigneeAgentId = "agent-dedicated";
+    state.grants.push(privacyGrant({ subjectType: "agent", subjectId: "agent-dedicated" }));
+    const restore = installPrivacyApi(state);
+    try {
+      await fetch("/api/issues/privacy-root", { method: "PATCH", body: JSON.stringify({ title: "Keep its independent access" }) });
+      expect(state.grants.filter(grant => grant.issueId === "privacy-root" && grant.subjectId === "agent-dedicated")).toHaveLength(1);
+    } finally { restore(); }
+  });
+  it.each([null, "agent-dedicated"])("uses the new task's actual assignment %s", async (assigneeAgentId) => {
+    const restore = installPrivacyApi(createPrivacyState({ grants: "empty" }));
+    try {
+      await fetch(`/api/companies/${privacyCompanyId}/issues`, { method: "POST", body: JSON.stringify({ title: "Created private task", visibility: "private", assigneeAgentId }) });
+      const grants = await fetch("/api/issues/privacy-created/access-grants").then(response => response.json());
+      expect(grants).toContainEqual(expect.objectContaining({ issueId: "privacy-created", subjectId: "user-board", source: "owner", inherited: false }));
+      expect(grants.filter((grant: { source: string }) => grant.source === "assignment")).toHaveLength(assigneeAgentId ? 1 : 0);
     } finally { restore(); }
   });
 });

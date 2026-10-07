@@ -85,9 +85,8 @@ export const CompanyAdmin: Story = {
 export const MakePublicConfirmation: Story = {
   play: async ({ canvasElement }) => {
     const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await page.findByRole("button", { name: "Make public" }),
-    );
+    await waitFor(() => expect(page.getByRole("button", { name: "Make public" })).toBeEnabled());
+    await userEvent.click(page.getByRole("button", { name: "Make public" }));
     await expect(await page.findByRole("alertdialog")).toHaveTextContent(
       "Existing private subtasks keep their privacy",
     );
@@ -97,9 +96,8 @@ export const MakePublicFailure: Story = {
   parameters: { privacy: { failure: "visibility" } },
   play: async ({ canvasElement }) => {
     const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await page.findByRole("button", { name: "Make public" }),
-    );
+    await waitFor(() => expect(page.getByRole("button", { name: "Make public" })).toBeEnabled());
+    await userEvent.click(page.getByRole("button", { name: "Make public" }));
     const dialog = await page.findByRole("alertdialog");
     await userEvent.click(
       within(dialog).getByRole("button", { name: "Make public" }),
@@ -123,7 +121,7 @@ export const InheritedPrivateParent: Story = {
     const button = await page.findByRole("button", { name: "Make public" });
     await expect(button).toBeDisabled();
     await userEvent.hover(button.parentElement!);
-    await expect(await page.findByRole("tooltip")).toHaveTextContent("private parent");
+    await waitFor(async () => expect(await page.findByRole("tooltip")).toHaveTextContent("private parent"));
   },
 };
 export const PrivateProjectRestriction: Story = {
@@ -133,7 +131,7 @@ export const PrivateProjectRestriction: Story = {
     const button = await page.findByRole("button", { name: "Make public" });
     await waitFor(() => expect(button).toBeDisabled());
     await userEvent.hover(button.parentElement!);
-    await expect(await page.findByRole("tooltip")).toHaveTextContent("private project");
+    await waitFor(async () => expect(await page.findByRole("tooltip")).toHaveTextContent("private project"));
   },
 };
 export const PersonalProjectCanMakePublic: Story = {
