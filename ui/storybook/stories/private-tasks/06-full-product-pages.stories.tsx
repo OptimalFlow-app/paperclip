@@ -231,6 +231,7 @@ export const OwnerMovesOutOfPrivateParent: Story = {
   },
 };
 export const OwnerMovesOutOfPrivateProject: Story = {
+  render: () => <PrivacyPage />,
   parameters: { privacy: { taskProject: true }, docs: { description: { story: "The owner removes the private project through the production properties picker. The task keeps its private visibility, and Make public becomes available without a page reload." } } },
   play: async ({ canvasElement }) => {
     const page = await openTaskMenu(canvasElement);
