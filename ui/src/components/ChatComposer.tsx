@@ -11,6 +11,8 @@ import {
 } from "react";
 import { AlertTriangle, Check, Loader2, Paperclip, Send } from "lucide-react";
 import { cn } from "../lib/utils";
+import { appendDictatedText } from "../hooks/useSpeechDictation";
+import { DictationButton } from "./DictationButton";
 
 /**
  * Shared chat composer (PAP-95a / PAP-96).
@@ -138,6 +140,9 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
+  // Dictated phrases can land between renders; append to the freshest value.
+  const valueRef = useRef(value);
+  valueRef.current = value;
   const [isDragOver, setIsDragOver] = useState(false);
 
   const canAttach = typeof onAttachFiles === "function";
@@ -356,6 +361,17 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
         <span className="flex-1" />
 
         {trailingTools}
+
+        <DictationButton
+          onText={(text) => {
+            const next = appendDictatedText(valueRef.current, text);
+            valueRef.current = next;
+            onChange(singleLine ? next.replace(/\r?\n/g, " ") : next);
+          }}
+          disabled={disabled || submitting}
+          className="size-7 rounded-md"
+          testId="chat-composer-dictation"
+        />
 
         <button
           type="button"
