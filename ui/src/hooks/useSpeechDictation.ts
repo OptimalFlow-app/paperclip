@@ -79,6 +79,44 @@ function describeSpeechError(code: string): string | null {
   }
 }
 
+const LANG_STORAGE_KEY = "paperclip.dictation.lang";
+const BASE_DICTATION_LANGS = ["fr-FR", "en-US"];
+
+/** Languages offered by the composer toggle: French, English, then the browser's own. */
+export function getDictationLanguages(): string[] {
+  const browser = typeof navigator === "undefined" ? [] : [...(navigator.languages ?? []), navigator.language];
+  const langs = [...BASE_DICTATION_LANGS];
+  for (const tag of browser) {
+    if (!tag || !tag.includes("-")) continue;
+    if (!langs.some((known) => known.toLowerCase() === tag.toLowerCase())) langs.push(tag);
+  }
+  return langs;
+}
+
+function readStoredDictationLang(): string | null {
+  try {
+    return window.localStorage.getItem(LANG_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** The dictation language, remembered per browser; defaults to the browser language. */
+export function useDictationLanguage() {
+  const [lang, setLangState] = useState(
+    () => readStoredDictationLang() ?? (typeof navigator === "undefined" ? "" : navigator.language) ?? "",
+  );
+  const setLang = useCallback((next: string) => {
+    setLangState(next);
+    try {
+      window.localStorage.setItem(LANG_STORAGE_KEY, next);
+    } catch {
+      // Storage unavailable (private mode): keep the choice for this page only.
+    }
+  }, []);
+  return [lang, setLang] as const;
+}
+
 export interface UseSpeechDictationOptions {
   onFinalText: (text: string) => void;
   /** BCP-47 language tag; defaults to the browser language. */

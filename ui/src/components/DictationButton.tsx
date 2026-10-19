@@ -1,7 +1,11 @@
 import { useEffect } from "react";
 import { Mic, MicOff } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useSpeechDictation } from "@/hooks/useSpeechDictation";
+import {
+  getDictationLanguages,
+  useDictationLanguage,
+  useSpeechDictation,
+} from "@/hooks/useSpeechDictation";
 
 interface DictationButtonProps {
   /** Receives each finalized dictated phrase. */
@@ -22,9 +26,20 @@ export function DictationButton({
   className,
   testId = "composer-dictation",
 }: DictationButtonProps) {
+  const [lang, setLang] = useDictationLanguage();
   const { supported, listening, interim, error, stop, toggle } = useSpeechDictation({
     onFinalText: onText,
+    lang,
   });
+
+  // Recognition reads its language at start, so switching mid-session stops it.
+  const cycleLang = () => {
+    if (listening) stop();
+    const langs = getDictationLanguages();
+    const index = langs.findIndex((tag) => tag.toLowerCase() === lang.toLowerCase());
+    setLang(langs[(index + 1) % langs.length]);
+  };
+  const shortLang = (lang.split("-")[0] || "?").toUpperCase();
 
   useEffect(() => {
     if (disabled && listening) stop();
@@ -39,7 +54,20 @@ export function DictationButton({
 
   return (
     // Disabled buttons don't show tooltips in every browser; the wrapper does.
-    <span className="relative inline-flex shrink-0" title={supported ? undefined : label}>
+    <span className="relative inline-flex shrink-0 items-center" title={supported ? undefined : label}>
+      {supported ? (
+        <button
+          type="button"
+          onClick={cycleLang}
+          disabled={disabled}
+          aria-label={`Dictation language: ${lang}. Click to change`}
+          title={`Dictation language: ${lang} (click to change)`}
+          data-testid={`${testId}-lang`}
+          className="h-6 shrink-0 rounded px-1 text-[10px] font-medium tracking-wide text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {shortLang}
+        </button>
+      ) : null}
       <button
         type="button"
         onClick={toggle}

@@ -50,6 +50,7 @@ describe("appendDictatedText", () => {
 describe("DictationButton", () => {
   beforeEach(() => {
     FakeRecognition.instances = [];
+    window.localStorage.clear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -100,5 +101,20 @@ describe("DictationButton", () => {
       FakeRecognition.instances[0].onend?.();
     });
     expect(container.querySelector("[role='alert']")?.textContent).toContain("denied");
+  });
+
+  it("dictates in the chosen language and remembers it", () => {
+    (window as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition = FakeRecognition;
+    window.localStorage.setItem("paperclip.dictation.lang", "en-US");
+    render(<DictationButton onText={() => {}} />);
+    const langButton = () => container.querySelector<HTMLButtonElement>("[data-testid='composer-dictation-lang']")!;
+    expect(langButton().textContent).toBe("EN");
+
+    act(() => langButton().click());
+    expect(langButton().textContent).toBe("FR");
+    expect(window.localStorage.getItem("paperclip.dictation.lang")).toBe("fr-FR");
+
+    act(() => button()!.click());
+    expect(FakeRecognition.instances[0].lang).toBe("fr-FR");
   });
 });
