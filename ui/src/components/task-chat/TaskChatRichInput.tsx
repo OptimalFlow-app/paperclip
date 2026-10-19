@@ -6,6 +6,8 @@ import {
   type MentionOption,
 } from "@/components/MarkdownEditor";
 import { Button } from "@/components/ui/button";
+import { DictationButton } from "@/components/DictationButton";
+import { appendDictatedText } from "@/hooks/useSpeechDictation";
 
 interface TaskChatRichInputProps {
   value: string;
@@ -44,6 +46,9 @@ export function TaskChatRichInput({
   const uploadCountRef = useRef(0);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Dictated phrases can land between renders; append to the latest value.
+  const valueRef = useRef(value);
+  valueRef.current = value;
 
   useEffect(() => {
     if (!autoFocus) return;
@@ -106,37 +111,50 @@ export function TaskChatRichInput({
         bordered={false}
         contentClassName="max-h-(--sz-28dvh) min-h-(--sz-72px) overflow-y-auto px-0 py-0 text-sm scrollbar-auto-hide"
       />
-      {imageUploadHandler && showImageAttachControls ? (
-        <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            aria-label={attachAriaLabel}
-            onChange={(event) => {
-              void chooseImage(event.target.files?.[0] ?? null);
-              event.target.value = "";
-            }}
-          />
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="-ml-2 h-7 px-2"
-            disabled={disabled || uploading}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            {uploading ? (
-              <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <ImagePlus aria-hidden className="h-3.5 w-3.5" />
-            )}
-            Attach image
-          </Button>
-          <span>or drop/paste an image into the note</span>
-        </div>
-      ) : null}
+      <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+        {imageUploadHandler && showImageAttachControls ? (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              aria-label={attachAriaLabel}
+              onChange={(event) => {
+                void chooseImage(event.target.files?.[0] ?? null);
+                event.target.value = "";
+              }}
+            />
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="-ml-2 h-7 px-2"
+              disabled={disabled || uploading}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {uploading ? (
+                <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <ImagePlus aria-hidden className="h-3.5 w-3.5" />
+              )}
+              Attach image
+            </Button>
+            <span>or drop/paste an image into the note</span>
+          </>
+        ) : null}
+        <span className="flex-1" />
+        <DictationButton
+          onText={(text) => {
+            const next = appendDictatedText(valueRef.current, text);
+            valueRef.current = next;
+            onChange(next);
+          }}
+          disabled={disabled}
+          className="size-7 rounded-md"
+          testId={`${testId}-dictation`}
+        />
+      </div>
       {uploadError ? (
         <p className="mt-1 text-xs text-destructive" role="alert">
           {uploadError}
