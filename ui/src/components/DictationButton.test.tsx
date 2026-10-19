@@ -61,9 +61,11 @@ describe("DictationButton", () => {
     delete (window as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
   });
 
-  it("renders nothing when the browser lacks speech recognition", () => {
+  it("shows a disabled button when the browser lacks speech recognition", () => {
     render(<DictationButton onText={() => {}} />);
-    expect(button()).toBeNull();
+    expect(button()?.disabled).toBe(true);
+    expect(button()?.dataset.unsupported).toBe("true");
+    expect(button()?.title).toMatch(/isn't available in this browser/);
   });
 
   it("streams final phrases to onText and stops on second click", () => {

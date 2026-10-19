@@ -12,9 +12,9 @@ interface DictationButtonProps {
 }
 
 /**
- * Microphone toggle for prompt composers. Renders nothing when the browser has
- * no speech recognition, so composers can mount it unconditionally. While
- * listening, the in-progress phrase floats above the button.
+ * Microphone toggle for prompt composers. When the browser has no speech
+ * recognition (e.g. Firefox) it stays visible but disabled, with a tooltip
+ * explaining why. While listening, the in-progress phrase floats above it.
  */
 export function DictationButton({
   onText,
@@ -30,17 +30,21 @@ export function DictationButton({
     if (disabled && listening) stop();
   }, [disabled, listening, stop]);
 
-  if (!supported) return null;
-
-  const label = listening ? "Stop dictation" : "Dictate with microphone";
+  const label = !supported
+    ? "Voice dictation isn't available in this browser (use Chrome, Edge or Safari)"
+    : listening
+      ? "Stop dictation"
+      : "Dictate with microphone";
   const bubble = error ?? (listening ? interim || "Listening…" : null);
 
   return (
-    <span className="relative inline-flex shrink-0">
+    // Disabled buttons don't show tooltips in every browser; the wrapper does.
+    <span className="relative inline-flex shrink-0" title={supported ? undefined : label}>
       <button
         type="button"
         onClick={toggle}
-        disabled={disabled}
+        disabled={disabled || !supported}
+        data-unsupported={supported ? undefined : "true"}
         aria-label={label}
         aria-pressed={listening}
         title={label}
