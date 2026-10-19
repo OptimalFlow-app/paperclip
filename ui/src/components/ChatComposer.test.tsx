@@ -63,8 +63,8 @@ describe("ChatComposer", () => {
     expect(input()).toBeTruthy();
     expect(input().placeholder).toBe("Ask anything…");
     expect(attachButton()).toBeNull();
-    // No formatting toolbar — there is exactly one button (send) when bare.
-    expect(container.querySelectorAll("button").length).toBe(1);
+    // No formatting toolbar — only dictation + send when bare.
+    expect(container.querySelectorAll("button").length).toBe(2);
     act(() => root.unmount());
   });
 

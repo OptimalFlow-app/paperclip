@@ -9,6 +9,8 @@ import {
 } from "react";
 import { cn } from "@/lib/utils";
 import { useComposerStop } from "@/hooks/useComposerStop";
+import { appendDictatedText } from "@/hooks/useSpeechDictation";
+import { DictationButton } from "@/components/DictationButton";
 import { useStreamlinedTaskChatPresentation } from "./presentation-mode";
 import {
   DRAFT_DEBOUNCE_MS,
@@ -1555,6 +1557,12 @@ export function TaskChatComposer({
                 }}
               />
             ) : null}
+
+            <DictationButton
+              onText={(text) => changeBody(appendDictatedText(bodyRef.current, text))}
+              disabled={disabled || !!uncertainSubmission || Boolean(creation && submitting)}
+              testId="task-chat-composer-dictation"
+            />
 
             {queuedEdit ? (
               <button
