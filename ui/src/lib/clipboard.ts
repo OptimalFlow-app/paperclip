@@ -1,3 +1,15 @@
+/**
+ * Clipboard images must be PNG. Pass the blob as a promise and call this
+ * synchronously from the click handler: the write keeps the user gesture
+ * while the image is still downloading.
+ */
+export function copyImageToClipboard(png: Promise<Blob>): Promise<void> {
+  if (typeof navigator === "undefined" || !navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+    return Promise.reject(new Error("Image clipboard unavailable"));
+  }
+  return navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+}
+
 export async function copyTextToClipboard(text: string): Promise<void> {
   // The async Clipboard API is only reliable in a secure context. Over plain
   // HTTP on a non-localhost host (e.g. a Tailscale name) `writeText` may resolve

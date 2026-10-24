@@ -1,4 +1,5 @@
 import {
+  CalendarDays,
   Inbox,
   ListChecks,
   CircleCheck,
@@ -232,6 +233,7 @@ export function Sidebar({ children }: { children?: ReactNode }) {
               <SidebarStarredProjects />
             </>
           ) : null}
+          <SidebarNavItem to="/calendar" label="Calendar" icon={CalendarDays} />
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
           <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} />
           {showCases ? (
