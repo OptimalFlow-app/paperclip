@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useWideMarginsTarget } from "@/components/side-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { PropertiesPanel } from "./PropertiesPanel";
 
@@ -39,6 +40,11 @@ vi.mock("../context/PanelContext", () => ({
   }),
 }));
 
+function WideMarginsProbe() {
+  const wide = useWideMarginsTarget(true);
+  return <div data-testid="panel-content" data-wide={wide ? "true" : "false"}>document</div>;
+}
+
 async function flushReact() {
   for (let index = 0; index < 5; index += 1) {
     await Promise.resolve();
@@ -55,8 +61,9 @@ describe("PropertiesPanel", () => {
   async function renderPanel({
     panelVisible = true,
     taskDetailLayout = false,
-  }: { panelVisible?: boolean; taskDetailLayout?: boolean } = {}) {
-    mockPanelState.panelContent = <div data-testid="panel-content">content</div>;
+    content = <div data-testid="panel-content">content</div>,
+  }: { panelVisible?: boolean; taskDetailLayout?: boolean; content?: React.ReactNode } = {}) {
+    mockPanelState.panelContent = content;
     mockPanelState.panelVisible = panelVisible;
     root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -190,6 +197,52 @@ describe("PropertiesPanel", () => {
       expect(toggle!.getAttribute("aria-pressed")).toBe("true");
       expect(toggle!.querySelector(".lucide-panel-right-close")).not.toBeNull();
       expect(container.querySelector('[aria-label="Close side panel"]')).toBeNull();
+    });
+
+    it("offers the margins toggle only while maximized on a wide-margins target", async () => {
+      await renderPanel({ taskDetailLayout: true });
+      container.querySelector<HTMLButtonElement>('[aria-label="Maximize side panel"]')!.click();
+      await flushReact();
+      expect(container.querySelector('[aria-label="Wide margins"]')).toBeNull();
+    });
+
+    it("toggles wide margins for hosted documents and remembers the choice", async () => {
+      await renderPanel({ taskDetailLayout: true, content: <WideMarginsProbe /> });
+      const probe = () => container.querySelector('[data-testid="panel-content"]')!.getAttribute("data-wide");
+      expect(container.querySelector('[aria-label="Wide margins"]')).toBeNull();
+
+      container.querySelector<HTMLButtonElement>('[aria-label="Maximize side panel"]')!.click();
+      await flushReact();
+      const wideButton = container.querySelector<HTMLButtonElement>('[aria-label="Wide margins"]')!;
+      expect(wideButton.nextElementSibling?.getAttribute("aria-label")).toBe("Restore side panel");
+      expect(probe()).toBe("false");
+
+      wideButton.click();
+      await flushReact();
+      expect(probe()).toBe("true");
+      expect(window.localStorage.getItem("paperclip:side-panel-wide-margins")).toBe("true");
+
+      container.querySelector<HTMLButtonElement>('[aria-label="Restore side panel"]')!.click();
+      await flushReact();
+      expect(probe()).toBe("false");
+      expect(container.querySelector('[aria-label="Standard margins"]')).toBeNull();
+
+      container.querySelector<HTMLButtonElement>('[aria-label="Maximize side panel"]')!.click();
+      await flushReact();
+      expect(probe()).toBe("true");
+      container.querySelector<HTMLButtonElement>('[aria-label="Standard margins"]')!.click();
+      await flushReact();
+      expect(probe()).toBe("false");
+      expect(window.localStorage.getItem("paperclip:side-panel-wide-margins")).toBe("false");
+    });
+
+    it("reapplies a remembered wide-margins choice on the next maximize", async () => {
+      window.localStorage.setItem("paperclip:side-panel-wide-margins", "true");
+      await renderPanel({ taskDetailLayout: true, content: <WideMarginsProbe /> });
+      container.querySelector<HTMLButtonElement>('[aria-label="Maximize side panel"]')!.click();
+      await flushReact();
+      expect(container.querySelector('[data-testid="panel-content"]')!.getAttribute("data-wide")).toBe("true");
+      expect(container.querySelector('[aria-label="Standard margins"]')).not.toBeNull();
     });
 
     it("restores a remembered width from localStorage (clamped to the minimum)", async () => {

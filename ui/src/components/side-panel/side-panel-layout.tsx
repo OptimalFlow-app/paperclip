@@ -1,7 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 
-const WIDE_MARGINS_STORAGE_KEY = "paperclip:side-panel-wide-margins";
-
 /**
  * Layout state the maximized side-panel host shares with its hosted content.
  * Hosted content that renders a centered reading column (documents, skills)
@@ -43,20 +41,4 @@ export function useWideMarginsTargetCount(): [number, () => () => void] {
     return () => setCount((current) => current - 1);
   }, []);
   return [count, register];
-}
-
-export function readWideMarginsPreference(): boolean {
-  try {
-    return localStorage.getItem(WIDE_MARGINS_STORAGE_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-export function writeWideMarginsPreference(wide: boolean) {
-  try {
-    localStorage.setItem(WIDE_MARGINS_STORAGE_KEY, String(wide));
-  } catch {
-    // Ignore storage failures.
-  }
 }

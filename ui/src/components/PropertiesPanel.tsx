@@ -7,12 +7,10 @@ import { cn } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
-  readWideMarginsPreference,
   SidePanelFrame,
   SidePanelLayoutProvider,
   SidePanelWindowControls,
   useWideMarginsTargetCount,
-  writeWideMarginsPreference,
 } from "@/components/side-panel";
 
 export function PropertiesPanel({ taskDetailLayout = false }: { taskDetailLayout?: boolean }) {
@@ -86,6 +84,7 @@ export const PROPERTIES_PANE_HEADER_SLOT_ID = "properties-pane-header-slot";
 export const PROPERTIES_PANE_FOOTER_SLOT_ID = "properties-pane-footer-slot";
 
 const WIDTH_STORAGE_KEY = "taskChatRedesign.propertiesPaneWidth";
+const WIDE_MARGINS_STORAGE_KEY = "paperclip:side-panel-wide-margins";
 const TASK_DETAIL_WIDTH_STORAGE_KEY = "taskChatRedesign.taskDetailPropertiesPaneWidth";
 const DEFAULT_PANE_WIDTH = 322;
 const TASK_DETAIL_DEFAULT_PANE_WIDTH = 434;
@@ -133,6 +132,24 @@ function clearStoredPaneWidth(storageKey: string) {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.removeItem(storageKey);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function readWideMarginsPreference(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(WIDE_MARGINS_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function persistWideMarginsPreference(wide: boolean) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(WIDE_MARGINS_STORAGE_KEY, String(wide));
   } catch {
     // Ignore storage failures.
   }
@@ -345,7 +362,7 @@ function ResizablePropertiesPanel({
 
   const handleWideMarginsChange = useCallback((wide: boolean) => {
     setWideMarginsPreferred(wide);
-    writeWideMarginsPreference(wide);
+    persistWideMarginsPreference(wide);
   }, []);
 
   const layout = useMemo(() => ({

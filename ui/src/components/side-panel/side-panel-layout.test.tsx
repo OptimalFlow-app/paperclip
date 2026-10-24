@@ -4,11 +4,9 @@ import { act, useMemo } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  readWideMarginsPreference,
   SidePanelLayoutProvider,
   useWideMarginsTarget,
   useWideMarginsTargetCount,
-  writeWideMarginsPreference,
 } from "./side-panel-layout";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -72,13 +70,5 @@ describe("side-panel layout context", () => {
   it("is inert outside a host", async () => {
     await act(async () => root.render(<Target active />));
     expect(states()).toEqual(["standard"]);
-  });
-
-  it("persists the preference in localStorage, defaulting to standard", () => {
-    expect(readWideMarginsPreference()).toBe(false);
-    writeWideMarginsPreference(true);
-    expect(readWideMarginsPreference()).toBe(true);
-    writeWideMarginsPreference(false);
-    expect(readWideMarginsPreference()).toBe(false);
   });
 });

@@ -1,11 +1,9 @@
 export { SidePanelFrame, SidePanelToggleButton, SidePanelWindowControls } from "./SidePanelFrame";
 export {
-  readWideMarginsPreference,
   SidePanelLayoutProvider,
   useSidePanelLayout,
   useWideMarginsTarget,
   useWideMarginsTargetCount,
-  writeWideMarginsPreference,
   type SidePanelLayoutValue,
 } from "./side-panel-layout";
 export { SidePanelLauncher } from "./SidePanelLauncher";
