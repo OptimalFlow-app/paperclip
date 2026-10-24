@@ -1,4 +1,5 @@
 import {
+  CalendarDays,
   Inbox,
   ListChecks,
   CircleDot,
@@ -184,6 +185,7 @@ export function Sidebar() {
           {showCases ? (
             <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />
           ) : null}
+          <SidebarNavItem to="/calendar" label="Calendar" icon={CalendarDays} />
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
           {showPipelines ? (
             <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
