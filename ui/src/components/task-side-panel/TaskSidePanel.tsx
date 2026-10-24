@@ -46,6 +46,7 @@ import {
   SidePanelMobileTabs,
   useScrollbarWhileScrolling,
   useSidePanelTabs,
+  useWideMarginsTarget,
   type SidePanelLauncherItem,
   type SidePanelLauncherSection,
   type SidePanelTabItem,
@@ -353,6 +354,7 @@ export function TaskSidePanel({
     }
   }, [openBrowserId, controller.activeTabId, onBrowserOpened, accountScope, issue.companyId, issue.id, fileTabsEnabled]);
   const activeTab = controller.tabs.find((tab) => tab.id === controller.activeTabId) ?? null;
+  const wideMargins = useWideMarginsTarget(!mobile && activeTab?.contentMode === "prose");
   const subtasksAvailable = showRelatedTasks && (taskCount > 0 || tasksTab?.hasError === true);
   const hasSubtasksTab = controller.tabs.some((tab) => tab.id === "subtasks");
 
@@ -849,7 +851,11 @@ export function TaskSidePanel({
           </div>
         ) : null)}
         {contentMode === "prose" ? (
-          <div data-side-panel-prose-content="true" className="mx-auto w-full max-w-4xl px-6 py-4">
+          <div
+            data-side-panel-prose-content="true"
+            data-wide-margins={wideMargins ? "true" : undefined}
+            className={cn("mx-auto w-full py-4", wideMargins ? "max-w-none px-4" : "max-w-4xl px-6")}
+          >
             {content}
           </div>
         ) : content}

@@ -88,6 +88,47 @@ describe("side-panel shell controls", () => {
     expect(onToggle).toHaveBeenCalledOnce();
   });
 
+  it("offers the margins toggle only when the host passes a handler", async () => {
+    const onWideMarginsChange = vi.fn();
+    await act(async () => root.render(
+      <TooltipProvider>
+        <SidePanelWindowControls maximized onMaximizedChange={vi.fn()} onToggle={vi.fn()} />
+      </TooltipProvider>,
+    ));
+    expect(container.querySelector('[aria-label="Wide margins"]')).toBeNull();
+
+    await act(async () => root.render(
+      <TooltipProvider>
+        <SidePanelWindowControls
+          maximized
+          onMaximizedChange={vi.fn()}
+          onToggle={vi.fn()}
+          onWideMarginsChange={onWideMarginsChange}
+        />
+      </TooltipProvider>,
+    ));
+    const wideButton = container.querySelector<HTMLButtonElement>('[aria-label="Wide margins"]')!;
+    expect(wideButton.getAttribute("title")).toBe("Wide margins");
+    expect(wideButton.nextElementSibling?.getAttribute("aria-label")).toBe("Restore side panel");
+    await act(async () => wideButton.click());
+    expect(onWideMarginsChange).toHaveBeenCalledWith(true);
+
+    await act(async () => root.render(
+      <TooltipProvider>
+        <SidePanelWindowControls
+          maximized
+          onMaximizedChange={vi.fn()}
+          onToggle={vi.fn()}
+          wideMargins
+          onWideMarginsChange={onWideMarginsChange}
+        />
+      </TooltipProvider>,
+    ));
+    const standardButton = container.querySelector<HTMLButtonElement>('[aria-label="Standard margins"]')!;
+    await act(async () => standardButton.click());
+    expect(onWideMarginsChange).toHaveBeenLastCalledWith(false);
+  });
+
   it("keeps the task-detail frame borderless except for its docked left edge", async () => {
     await act(async () => root.render(
       <SidePanelFrame header={<div>Tabs</div>} footer={<div>Actions</div>} headerSize="task-detail">

@@ -2345,6 +2345,12 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
   margin: 0;
 }
 
+/* Wide-margins reading column (maximized side panel): fit wide tables to the
+   column, wrapping cells down to their min-width before scrolling. */
+[data-wide-margins="true"] .paperclip-markdown-table-scroll table {
+  width: auto;
+}
+
 .paperclip-markdown-table-scroll :where(th, td) {
   min-width: 8rem;
   max-width: 18rem;

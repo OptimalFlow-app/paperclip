@@ -16,7 +16,9 @@ Never put React nodes or fetched content in a persisted `SidePanelTabRecord`. Pr
 
 Use `headerSize="task-detail"` on `SidePanelFrame` when the panel shares the 60px task breadcrumb row. It keeps the task-detail footer treatment while matching the default portable header height.
 
-`SidePanelWindowControls` defaults to the production visibility-toggle icon. Streamlined task-detail panels use `closeControl="close"` for an explicit X while retaining the same close behavior and accessible labeling.
+`SidePanelWindowControls` defaults to the production visibility-toggle icon. Streamlined task-detail panels use `closeControl="close"` for an explicit X while retaining the same close behavior and accessible labeling. Passing `onWideMarginsChange` adds a "Wide margins" / "Standard margins" toggle left of maximize/restore.
+
+`SidePanelLayoutProvider` lets a maximizing host share `maximized` and `wideMargins` with hosted content. Content with a centered reading column calls `useWideMarginsTarget(active)` to register itself (the host counts targets with `useWideMarginsTargetCount` and only offers the toggle when one is mounted) and to learn whether to drop the column cap; marking that column `data-wide-margins="true"` also lets markdown tables fit it instead of scrolling. The host owns persistence of the preference.
 
 The Streamlined task adapter registers a counted Subtasks tab only when the current task has child tasks. Closing it moves the surface back into the `+` launcher for the remainder of the session; tasks without children do not advertise the tab.
 
