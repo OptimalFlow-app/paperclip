@@ -310,6 +310,7 @@ import {
   setIssueExecutionPolicyMonitorScheduledBy,
 } from "../services/issue-execution-policy.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
+import { buildProjectFlow, projectFlowService } from "../services/project-flow.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import {
   buildPromotedSourceTrust,
@@ -3557,6 +3558,7 @@ export function issueRoutes(
   const instanceSettings = instanceSettingsService(db);
   const agentsSvc = agentService(db);
   const projectsSvc = projectService(db);
+  const projectFlow = projectFlowService(db);
   const goalsSvc = goalService(db);
   const issueApprovalsSvc = issueApprovalService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
@@ -8771,6 +8773,25 @@ export function issueRoutes(
     );
 
     res.json(response);
+  });
+
+  router.get("/projects/:id/flow", async (req, res) => {
+    const id = req.params.id as string;
+    const project = await getAccessibleResource(req, res, projectsSvc.getById(id), "Project not found");
+    if (!project) return;
+    const decision = await access.decide({
+      actor: req.actor,
+      action: "project:read",
+      resource: { type: "project", companyId: project.companyId, projectId: project.id },
+    });
+    if (!decision.allowed) {
+      res.status(403).json({ error: "Project is outside this actor's authorization boundary" });
+      return;
+    }
+
+    const rows = await projectFlow.getProjectFlowRows(project);
+    const visibleIssues = await filterIssuesForActor(req, rows.issues);
+    res.json(buildProjectFlow(project.id, { ...rows, issues: visibleIssues }));
   });
 
   router.get("/issues/:id/diagnostics/subtree", async (req, res) => {

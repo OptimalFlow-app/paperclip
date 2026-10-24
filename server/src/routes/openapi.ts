@@ -10201,6 +10201,13 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "get",
+  path: "/api/projects/{id}/flow",
+  tags: ["projects"],
+  summary: "Get the project flow: pipeline stages and where each case stands, with its linked tasks",
+});
+
+registerCurrentRoute({
+  method: "get",
   path: "/api/issues/{id}/diagnostics/subtree",
   tags: ["issues"],
   summary: "Get bounded subtree wake and blocker diagnostics for an issue",

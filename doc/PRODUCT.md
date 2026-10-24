@@ -224,6 +224,28 @@ with the task list's filters and a sort control. The agent's artifacts are a
 second card stack available from the panel's **+** menu. Both open in a new tab
 so the conversation stays open.
 
+### Project flow view
+
+A project's **Flow** tab shows each pipeline attached to the project as rows of
+nodes: one row per case (deliverable), one node per stage of the method,
+including stages that have no task yet. Stages before the case's current stage
+are validated, later ones not started. The current stage takes the colour of
+its task: in progress, waiting for confirmation, blocked. A stage whose task is
+done while the case has not moved on yet still waits for its validation, and
+names whoever the case's main task waits on. A node pulses while a run executes
+on its task. Stages with a review show "rounds used / maximum"; hover it to read
+each decision. Served by `GET /api/projects/:id/flow`, no schema of its own:
+
+- `pipeline_stages.config.flow` = `{ author?, verifier?, maxReviewRounds? }`,
+  where a role is `{ agentId }`, `{ userId }` or `{ label }` (for example
+  `{ "label": "Founders" }`). Without `maxReviewRounds`, the task policy's
+  `maxReviewRounds` applies (3 by default).
+- `pipeline_cases.fields.stageIssues` = `{ "<stageKey>": "<issue id or
+  identifier>" }` points a stage to its task. A case whose single task travels
+  through every stage needs none: the `origin` issue link speaks for the
+  current stage.
+- Moving a case on is `POST /api/cases/:id/transition`.
+
 ### Combined Inbox + Task List
 
 An opt-in experimental setting (`enableCombinedInboxTasks`, off by default)

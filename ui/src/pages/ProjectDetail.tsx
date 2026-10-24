@@ -37,6 +37,7 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { Tabs } from "@/components/ui/tabs";
+import { ProjectFlowView } from "@/components/project-flow/ProjectFlowView";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
 import {
@@ -48,7 +49,7 @@ import {
 
 /* ── Top-level tab types ── */
 
-type ProjectBaseTab = "list" | "plugin-operations" | "workspaces" | "configuration" | "budget";
+type ProjectBaseTab = "list" | "flow" | "plugin-operations" | "workspaces" | "configuration" | "budget";
 type ProjectPluginTab = `plugin:${string}`;
 type ProjectTab = ProjectBaseTab | ProjectPluginTab;
 
@@ -65,6 +66,7 @@ function resolveProjectTab(pathname: string, projectId: string): ProjectTab | nu
   if (tab === "configuration") return "configuration";
   if (tab === "budget") return "budget";
   if (tab === "issues") return "list";
+  if (tab === "flow") return "flow";
   if (tab === "plugin-operations") return "plugin-operations";
   if (tab === "workspaces") return "workspaces";
   return null;
@@ -514,6 +516,10 @@ export function ProjectDetail() {
       navigate(`/projects/${canonicalProjectRef}/budget`, { replace: true });
       return;
     }
+    if (activeTab === "flow") {
+      navigate(`/projects/${canonicalProjectRef}/flow`, { replace: true });
+      return;
+    }
     if (activeTab === "plugin-operations") {
       navigate(`/projects/${canonicalProjectRef}/plugin-operations`, { replace: true });
       return;
@@ -666,6 +672,9 @@ export function ProjectDetail() {
     if (cachedTab === "budget") {
       return <Navigate to={`/projects/${canonicalProjectRef}/budget`} replace />;
     }
+    if (cachedTab === "flow") {
+      return <Navigate to={`/projects/${canonicalProjectRef}/flow`} replace />;
+    }
     if (cachedTab === "plugin-operations" && project?.managedByPlugin) {
       return <Navigate to={`/projects/${canonicalProjectRef}/plugin-operations`} replace />;
     }
@@ -707,6 +716,8 @@ export function ProjectDetail() {
       navigate(`/projects/${canonicalProjectRef}/workspaces`);
     } else if (tab === "budget") {
       navigate(`/projects/${canonicalProjectRef}/budget`);
+    } else if (tab === "flow") {
+      navigate(`/projects/${canonicalProjectRef}/flow`);
     } else if (tab === "plugin-operations") {
       navigate(`/projects/${canonicalProjectRef}/plugin-operations`);
     } else if (tab === "configuration") {
@@ -840,6 +851,7 @@ export function ProjectDetail() {
         <PageTabBar
           items={[
             { value: "list", label: "Tasks" },
+            { value: "flow", label: "Flow" },
 
             ...(project.managedByPlugin ? [{ value: "plugin-operations", label: "Plugin operations" }] : []),
             ...(showWorkspacesTab ? [{ value: "workspaces", label: "Workspaces" }] : []),
@@ -860,6 +872,10 @@ export function ProjectDetail() {
 
       {activeTab === "list" && project?.id && resolvedCompanyId && (
         <ProjectIssuesList projectId={project.id} companyId={resolvedCompanyId} />
+      )}
+
+      {activeTab === "flow" && project?.id && resolvedCompanyId && (
+        <ProjectFlowView projectId={project.id} companyId={resolvedCompanyId} />
       )}
 
       {activeTab === "plugin-operations" && project?.id && resolvedCompanyId && project.managedByPlugin && (
