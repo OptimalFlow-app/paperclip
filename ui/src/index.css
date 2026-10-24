@@ -1412,6 +1412,17 @@ select:where(:not([multiple]):not(.appearance-none)):where(:not([size]), [size="
   animation: tc-live-ping var(--motion-approval-pulse) var(--motion-ease-standard) infinite;
 }
 
+/* Task flow view: a task with a run executing right now pulses in its state
+   hue (`--sc`, set by the node). Reduced motion zeroes the duration token. */
+@keyframes flow-node-live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--sc) 0%, transparent); }
+  50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--sc) 30%, transparent); }
+}
+
+.flow-node-live {
+  animation: flow-node-live-pulse var(--motion-approval-pulse) var(--motion-ease-standard) infinite;
+}
+
 .paperclip-markdown.task-chat-reasoning-markdown,
 .paperclip-markdown.task-chat-reasoning-markdown :is(h1, h2, h3, h4, h5, h6, strong) {
   font-size: inherit;

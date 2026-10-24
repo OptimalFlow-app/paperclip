@@ -28,6 +28,7 @@ import {
   ListTree,
   Plus,
   SlidersHorizontal,
+  Workflow,
   X,
 } from "lucide-react";
 import { fileResourcesApi } from "@/api/file-resources";
@@ -39,6 +40,7 @@ import { useAgentChatEnabled } from "@/hooks/useAgentChatEnabled";
 import { IssuePropertiesArtifactsTab } from "@/components/issue-properties/IssuePropertiesArtifactsTab";
 import { IssuePropertiesPlansTab } from "@/components/issue-properties/IssuePropertiesPlansTab";
 import { TaskDetailSubtasksPanel } from "@/components/task-detail/TaskDetailRelationsPanel";
+import { TaskFlowPanel } from "@/components/task-flow/TaskFlowPanel";
 import {
   SidePanelLauncher,
   SidePanelToggleButton,
@@ -80,6 +82,7 @@ import {
   taskPanelPropertiesTab,
   taskPanelSkillTab,
   taskPanelSubtasksTab,
+  taskPanelFlowTab,
   taskPanelWorkspaceFileTab,
   writeTaskSidePanelState,
   type TaskSidePanelTabPayload,
@@ -131,6 +134,7 @@ function tabIcon(tab: SidePanelTabRecord<TaskSidePanelTabPayload>): ReactNode {
     case "browser": return <Globe />;
     case "properties": return <SlidersHorizontal />;
     case "subtasks": return <ListTree />;
+    case "flow": return <Workflow />;
     case "artifacts": return <Box />;
     case "agent-tasks": return <ListChecks />;
     case "attachment": return <FileText />;
@@ -579,6 +583,7 @@ export function TaskSidePanel({
     ] : [
       { id: "properties", label: "Properties", icon: <SlidersHorizontal />, alreadyOpen: controller.tabs.some((tab) => tab.id === "properties") },
       ...(subtasksAvailable ? [{ id: "subtasks", label: taskLabel, description: tasksTab?.hasError ? "Could not load all tasks" : `${taskCount} total`, icon: <ListTree />, alreadyOpen: controller.tabs.some((tab) => tab.id === "subtasks") }] : []),
+      { id: "flow", label: "Flow", description: "Stages, review loops and who is on them", icon: <Workflow />, alreadyOpen: controller.tabs.some((tab) => tab.id === "flow") },
       { id: "artifacts", label: "Artifacts", icon: <Box />, alreadyOpen: controller.tabs.some((tab) => tab.id === "artifacts") },
     ];
     for (const [index, browser] of (browsersQuery.data ?? []).entries()) {
@@ -644,6 +649,7 @@ export function TaskSidePanel({
         activeTabId: "subtasks",
       });
     }
+    else if (item.id === "flow") controller.openTab(taskPanelFlowTab());
     else if (item.id === "artifacts") controller.openTab(taskPanelArtifactsTab());
     else if (item.id === "agent-tasks") controller.openTab(taskPanelAgentTasksTab());
     else if (item.id === "files") {
@@ -749,6 +755,8 @@ export function TaskSidePanel({
         issueLinkState={issueLinkState}
       />
     );
+  } else if (activeTab.payload.kind === "flow") {
+    content = <TaskFlowPanel issue={issue} issueLinkState={issueLinkState} />;
   } else if (activeTab.payload.kind === "agent-tasks") {
     content = conversationAgentId ? (
       <AgentTasksPanel companyId={issue.companyId} agentId={conversationAgentId} excludeIssueId={issue.id} />

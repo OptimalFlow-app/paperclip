@@ -224,6 +224,22 @@ with the task list's filters and a sort control. The agent's artifacts are a
 second card stack available from the panel's **+** menu. Both open in a new tab
 so the conversation stays open.
 
+### Task flow view
+
+The task side panel's **+** menu opens **Flow**: the task and its nested
+sub-tasks as a collapsible tree. Siblings follow their blocker chain, then
+creation order. Each card links to its task and takes the colour of its state:
+validated, in progress, waiting for confirmation, blocked or not started. A
+card pulses while a run executes on it. Each review or approval stage shows a
+loop counter, "rounds used / maximum". Rounds are the recorded changes-requested
+decisions on that stage. The maximum is the policy's `maxReviewRounds` (3 by
+default), the same limit that escalates a review to the responsible person.
+Hover the counter to read each decision. Cards name the people with their role:
+who works now, who must confirm, and, once validated, the author, reviewers and
+approvers. The panel also shows validated stages over the total and marks the
+unfinished tasks that hold others up. The view reads
+`GET /api/issues/:id/flow-tree` and refreshes with live issue and run events.
+
 ### Combined Inbox + Task List
 
 An opt-in experimental setting (`enableCombinedInboxTasks`, off by default)

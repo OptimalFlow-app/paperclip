@@ -10208,6 +10208,13 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "get",
+  path: "/api/issues/{id}/flow-tree",
+  tags: ["issues"],
+  summary: "Get the task flow tree: nested sub-tasks, blockers and review/approval rounds",
+});
+
+registerCurrentRoute({
+  method: "get",
   path: "/api/issues/{id}/recovery-actions",
   tags: ["issues"],
   summary: "List issue recovery actions",

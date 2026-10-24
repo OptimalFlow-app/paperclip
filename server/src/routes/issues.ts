@@ -310,6 +310,7 @@ import {
   setIssueExecutionPolicyMonitorScheduledBy,
 } from "../services/issue-execution-policy.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
+import { buildIssueFlowTree, issueFlowTreeService } from "../services/issue-flow-tree.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import {
   buildPromotedSourceTrust,
@@ -3521,6 +3522,7 @@ export function issueRoutes(
 ) {
   const router = Router();
   const svc = issueService(db);
+  const flowTree = issueFlowTreeService(db);
   const runRedactions = createRunSecretRedactionRegistry(db);
   const access = accessService(db);
   const secretProposals = createSecretProposalsService(db);
@@ -8771,6 +8773,31 @@ export function issueRoutes(
     );
 
     res.json(response);
+  });
+
+  router.get("/issues/:id/flow-tree", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await getAccessibleResource(
+      req,
+      res,
+      getIssueById(req, id),
+      "Issue not found",
+    );
+    if (!issue) return;
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+
+    const loaded = await flowTree.getFlowTreeRows(issue.id);
+    const visibleRows = await filterIssuesForActor(req, loaded.rows);
+    res.json(
+      buildIssueFlowTree({
+        rootIssueId: issue.id,
+        rows: visibleRows,
+        relations: loaded.relations,
+        decisions: loaded.decisions,
+        pendingInteractions: loaded.pendingInteractions,
+        truncated: loaded.truncated,
+      }),
+    );
   });
 
   router.get("/issues/:id/diagnostics/subtree", async (req, res) => {

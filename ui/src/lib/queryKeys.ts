@@ -348,6 +348,9 @@ export const queryKeys = {
       ["issues", companyId, "created-from", issueId] as const,
     listByDescendantRoot: (companyId: string, rootIssueId: string) =>
       ["issues", companyId, "descendants", rootIssueId] as const,
+    // Under the company issue prefix so live issue activity refreshes it.
+    flowTree: (companyId: string, rootIssueId: string) =>
+      ["issues", companyId, "flow-tree", rootIssueId] as const,
     listByExecutionWorkspace: (
       companyId: string,
       executionWorkspaceId: string,

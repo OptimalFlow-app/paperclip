@@ -17,6 +17,7 @@ import type {
   IssueComment,
   IssueQueuedCommentQueue,
   IssueDocument,
+  IssueFlowTreeResponse,
   IssueLabel,
   IssueRecoveryAction,
   IssueRetryNowResponse,
@@ -182,6 +183,7 @@ export const issuesApi = {
     const path = `/companies/${companyId}/issues${qs ? `?${qs}` : ""}`;
     return options ? api.get<Issue[]>(path, options) : api.get<Issue[]>(path);
   },
+  flowTree: (id: string) => api.get<IssueFlowTreeResponse>(`/issues/${id}/flow-tree`),
   listCompact: (
     companyId: string,
     filters?: IssueListFilters,
