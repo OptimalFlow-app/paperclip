@@ -1,5 +1,6 @@
 import type {
   Project,
+  ProjectFlowResponse,
   ProjectRepositoryOptions,
   ProjectWorkspace,
   WorkspaceOperation,
@@ -28,6 +29,7 @@ export const projectsApi = {
     return api.get<Project[]>("/companies/" + encodeURIComponent(companyId) + "/projects" + (query ? "?" + query : ""));
   },
   get: (id: string, companyId?: string) => api.get<Project>(projectPath(id, companyId)),
+  flow: (id: string) => api.get<ProjectFlowResponse>(projectPath(id, undefined, "/flow")),
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Project>(`/companies/${companyId}/projects`, data),
   update: (id: string, data: Record<string, unknown>, companyId?: string) =>
