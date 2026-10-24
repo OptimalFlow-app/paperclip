@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { usePanel } from "../context/PanelContext";
 import { useClassicTaskInterfaceEnabled } from "../hooks/useClassicTaskInterfaceEnabled";
@@ -6,7 +6,14 @@ import { useStreamlinedUiEnabled } from "../hooks/useStreamlinedUiEnabled";
 import { cn } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { SidePanelFrame, SidePanelWindowControls } from "@/components/side-panel";
+import {
+  readWideMarginsPreference,
+  SidePanelFrame,
+  SidePanelLayoutProvider,
+  SidePanelWindowControls,
+  useWideMarginsTargetCount,
+  writeWideMarginsPreference,
+} from "@/components/side-panel";
 
 export function PropertiesPanel({ taskDetailLayout = false }: { taskDetailLayout?: boolean }) {
   const {
@@ -178,6 +185,8 @@ function ResizablePropertiesPanel({
   );
   const [dragging, setDragging] = useState(false);
   const [maximized, setMaximized] = useState(false);
+  const [wideMarginsPreferred, setWideMarginsPreferred] = useState(readWideMarginsPreference);
+  const [wideMarginsTargetCount, registerWideMarginsTarget] = useWideMarginsTargetCount();
   const [fixedPane, setFixedPane] = useState<FixedPane | null>(null);
 
   const asideRef = useRef<HTMLElement | null>(null);
@@ -334,6 +343,17 @@ function ResizablePropertiesPanel({
     [maximized, finishRestore],
   );
 
+  const handleWideMarginsChange = useCallback((wide: boolean) => {
+    setWideMarginsPreferred(wide);
+    writeWideMarginsPreference(wide);
+  }, []);
+
+  const layout = useMemo(() => ({
+    maximized,
+    wideMargins: maximized && wideMarginsPreferred,
+    registerWideMarginsTarget,
+  }), [maximized, wideMarginsPreferred, registerWideMarginsTarget]);
+
   const isFixed = fixedPane !== null;
 
   return (
@@ -401,42 +421,46 @@ function ResizablePropertiesPanel({
           className={cn("flex-1 flex flex-col min-h-0", isFixed && "w-full")}
           style={isFixed ? undefined : { width, minWidth: width }}
         >
-          <SidePanelFrame
-            presentation="docked"
-            maximized={maximized}
-            contentMode="full-bleed"
-            headerSize={taskDetailLayout ? "task-detail" : "default"}
-            className="flex-1 border-l-0"
-            header={(
-              <div
-                id={PROPERTIES_PANE_HEADER_SLOT_ID}
-                className="flex min-w-0 flex-1 items-center self-stretch"
-              />
-            )}
-            trailingControls={(
-              <SidePanelWindowControls
-                maximized={maximized}
-                closeControl={taskDetailLayout ? "close" : "toggle"}
-                onMaximizedChange={(next) => {
-                  if (next) handleMaximize();
-                  else handleRestore();
-                }}
-                onToggle={() => setPanelVisible(false)}
-              />
-            )}
-            footer={<div id={PROPERTIES_PANE_FOOTER_SLOT_ID} />}
-          >
-            {panelContentMode === "full-bleed" ? panelContent : (
-              <ScrollArea className="h-full">
+          <SidePanelLayoutProvider value={layout}>
+            <SidePanelFrame
+              presentation="docked"
+              maximized={maximized}
+              contentMode="full-bleed"
+              headerSize={taskDetailLayout ? "task-detail" : "default"}
+              className="flex-1 border-l-0"
+              header={(
                 <div
-                  className={cn("p-4", maximized && "mx-auto w-full px-9")}
-                  style={maximized ? { maxWidth: MAXIMIZED_CONTENT_MAX_WIDTH } : undefined}
-                >
-                  {panelContent}
-                </div>
-              </ScrollArea>
-            )}
-          </SidePanelFrame>
+                  id={PROPERTIES_PANE_HEADER_SLOT_ID}
+                  className="flex min-w-0 flex-1 items-center self-stretch"
+                />
+              )}
+              trailingControls={(
+                <SidePanelWindowControls
+                  maximized={maximized}
+                  closeControl={taskDetailLayout ? "close" : "toggle"}
+                  onMaximizedChange={(next) => {
+                    if (next) handleMaximize();
+                    else handleRestore();
+                  }}
+                  onToggle={() => setPanelVisible(false)}
+                  wideMargins={wideMarginsPreferred}
+                  onWideMarginsChange={maximized && wideMarginsTargetCount > 0 ? handleWideMarginsChange : undefined}
+                />
+              )}
+              footer={<div id={PROPERTIES_PANE_FOOTER_SLOT_ID} />}
+            >
+              {panelContentMode === "full-bleed" ? panelContent : (
+                <ScrollArea className="h-full">
+                  <div
+                    className={cn("p-4", maximized && "mx-auto w-full px-9")}
+                    style={maximized ? { maxWidth: MAXIMIZED_CONTENT_MAX_WIDTH } : undefined}
+                  >
+                    {panelContent}
+                  </div>
+                </ScrollArea>
+              )}
+            </SidePanelFrame>
+          </SidePanelLayoutProvider>
         </div>
       </aside>
     </>

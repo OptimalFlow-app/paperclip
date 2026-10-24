@@ -1,5 +1,5 @@
 import type { CSSProperties, ReactNode } from "react";
-import { Maximize2, Minimize2, PanelRightClose, PanelRightOpen, X } from "lucide-react";
+import { FoldHorizontal, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, UnfoldHorizontal, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -140,14 +140,33 @@ export function SidePanelWindowControls({
   onMaximizedChange,
   onToggle,
   closeControl = "toggle",
+  wideMargins = false,
+  onWideMarginsChange,
 }: {
   maximized: boolean;
   onMaximizedChange: (maximized: boolean) => void;
   onToggle: () => void;
   closeControl?: "toggle" | "close";
+  wideMargins?: boolean;
+  /** When provided, renders the reading-column margins toggle left of maximize. */
+  onWideMarginsChange?: (wideMargins: boolean) => void;
 }) {
+  const marginsLabel = wideMargins ? "Standard margins" : "Wide margins";
   return (
     <>
+      {onWideMarginsChange ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="h-(--side-panel-tab-height) w-(--side-panel-tab-height) text-muted-foreground hover:text-foreground focus-visible:text-foreground"
+          onClick={() => onWideMarginsChange(!wideMargins)}
+          aria-label={marginsLabel}
+          title={marginsLabel}
+        >
+          {wideMargins ? <FoldHorizontal aria-hidden /> : <UnfoldHorizontal aria-hidden />}
+        </Button>
+      ) : null}
       <Button
         type="button"
         variant="ghost"
