@@ -248,6 +248,12 @@ import { FileViewerSheet } from "../components/FileViewerSheet";
 import { ArtifactFileChip } from "../components/ArtifactFileChip";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { StatusIcon } from "../components/StatusIcon";
+import { StageDecisionPanel } from "../components/issue-properties/stage-decision-panel";
+import {
+  isCurrentUserStageParticipant,
+  isStageDecisionStatus,
+  type IssueStageDecisionStatus,
+} from "../lib/issue-stage-decision";
 import { PriorityIcon } from "../components/PriorityIcon";
 import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
 import { Identity } from "../components/Identity";
@@ -3805,14 +3811,34 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     [issue],
   );
 
+  // The signed-in user is the participant the active review/approval stage is
+  // waiting on: the verdict goes through the stage decision form (one PATCH
+  // with status + comment), and the composer must not default to handing the
+  // issue to the last agent — that reassignment would drop the stage.
+  const awaitsMyStageDecision = isCurrentUserStageParticipant(issue, currentUserId);
+  const [stageDecision, setStageDecision] =
+    useState<IssueStageDecisionStatus | null>(null);
+  useEffect(() => {
+    setStageDecision(null);
+  }, [issue?.id, awaitsMyStageDecision]);
+
   const suggestedAssigneeValue = useMemo(
     () =>
-      suggestedCommentAssigneeValue(
-        issue ?? {},
-        mergeIssueComments(comments ?? [], optimisticComments),
-        currentUserId,
-      ),
-    [issue, comments, optimisticComments, currentUserId],
+      awaitsMyStageDecision
+        ? actualAssigneeValue
+        : suggestedCommentAssigneeValue(
+            issue ?? {},
+            mergeIssueComments(comments ?? [], optimisticComments),
+            currentUserId,
+          ),
+    [
+      awaitsMyStageDecision,
+      actualAssigneeValue,
+      issue,
+      comments,
+      optimisticComments,
+      currentUserId,
+    ],
   );
 
   const threadComments = useMemo(
@@ -5773,6 +5799,9 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         : undefined,
       onCheckMonitorNow: () => checkIssueMonitorNow.mutate(),
       checkingMonitorNow: checkIssueMonitorNow.isPending,
+      // The desktop pane sits beside the thread, so status picks open the
+      // decision form above the composer; mobile sheets keep their own form.
+      onStageDecisionRequest: setStageDecision,
       documentDeepLink:
         documentDeepLink?.issueId === panelIssue.id ? documentDeepLink : null,
       onAttachmentOpened: handleAttachmentOpened,
@@ -7020,7 +7049,13 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       status={issue.status} externalConversationState={issue.externalConversationState}
       size="lg"
       blockerAttention={issue.blockerAttention}
-      onChange={(status) => updateIssue.mutate({ status })}
+      onChange={(status) => {
+        if (awaitsMyStageDecision && isStageDecisionStatus(status)) {
+          setStageDecision(status);
+          return;
+        }
+        updateIssue.mutate({ status });
+      }}
     />
   );
 
@@ -7992,14 +8027,25 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   onRefreshLatestComments={refetchLatestComments}
                   composerRef={commentComposerRef}
                   composerAccessory={
-                    hasVisibleMonitorSurface(issue) ? (
-                      <IssueMonitorComposerStrip
-                        issue={issue}
-                        workProducts={workProducts}
-                        checkError={checkIssueMonitorNow.error?.message}
-                        onCheckNow={() => checkIssueMonitorNow.mutate()}
-                        checkingNow={checkIssueMonitorNow.isPending}
-                      />
+                    awaitsMyStageDecision || hasVisibleMonitorSurface(issue) ? (
+                      <>
+                        {awaitsMyStageDecision ? (
+                          <StageDecisionPanel
+                            issue={issue}
+                            decision={stageDecision}
+                            onDecisionChange={setStageDecision}
+                          />
+                        ) : null}
+                        {hasVisibleMonitorSurface(issue) ? (
+                          <IssueMonitorComposerStrip
+                            issue={issue}
+                            workProducts={workProducts}
+                            checkError={checkIssueMonitorNow.error?.message}
+                            onCheckNow={() => checkIssueMonitorNow.mutate()}
+                            checkingNow={checkIssueMonitorNow.isPending}
+                          />
+                        ) : null}
+                      </>
                     ) : null
                   }
                   footer={

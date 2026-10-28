@@ -122,6 +122,12 @@ import {
   reusableWorkspaceOptionMatches,
 } from "../../lib/reusable-execution-workspaces";
 import { issueReviewPolicyBadge } from "../../lib/review-policy";
+import {
+  isCurrentUserStageParticipant,
+  isStageDecisionStatus,
+  type IssueStageDecisionStatus,
+} from "../../lib/issue-stage-decision";
+import { StageDecisionPanel } from "./stage-decision-panel";
 import { IssueCasesPanel } from "../IssueCasesPanel";
 import { ExpandRelationListButton, RemovableIssueReferencePill } from "./relation-controls";
 import { Badge } from "@/components/ui/badge";
@@ -206,6 +212,10 @@ interface IssuePropertiesProps {
   documentDeepLink?: IssuePropertiesDocumentDeepLink | null;
   /** Render only the Properties body when a parent owns the side-panel tabs. */
   sidePanelContentOnly?: boolean;
+  /** Set when the host renders the stage decision form itself (above the
+   * composer): status picks that need a decision comment are handed to it and
+   * the properties panel shows no duplicate form. */
+  onStageDecisionRequest?: (status: IssueStageDecisionStatus) => void;
 }
 
 export interface IssuePropertiesDocumentDeepLink {
@@ -244,6 +254,7 @@ export function IssueProperties({
   checkingMonitorNow = false,
   documentDeepLink,
   sidePanelContentOnly = false,
+  onStageDecisionRequest,
 }: IssuePropertiesProps) {
   const { selectedCompanyId } = useCompany();
   const { isMobile } = useSidebar();
@@ -415,6 +426,21 @@ export function IssueProperties({
     queryFn: () => authApi.getSession(),
   });
   const currentUserId = session?.user?.id ?? session?.session?.userId;
+  const [stageDecision, setStageDecision] = useState<IssueStageDecisionStatus | null>(null);
+  const awaitsCurrentUserDecision = isCurrentUserStageParticipant(issue, currentUserId);
+  useEffect(() => {
+    setStageDecision(null);
+  }, [issue.id, awaitsCurrentUserDecision]);
+  // The server rejects a bare `done`/`in_progress` from the stage participant
+  // (422: the decision needs a comment), so route those picks to the form.
+  const handleStatusChange = (status: string) => {
+    if (awaitsCurrentUserDecision && isStageDecisionStatus(status)) {
+      if (onStageDecisionRequest) onStageDecisionRequest(status);
+      else setStageDecision(status);
+      return;
+    }
+    onUpdate({ status });
+  };
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(companyId!),
@@ -2341,10 +2367,18 @@ export function IssueProperties({
             externalConversationState={issue.externalConversationState}
             glyphContainerClassName="inline-flex size-6 shrink-0 items-center justify-center"
             blockerAttention={issue.blockerAttention}
-            onChange={(status) => onUpdate({ status })}
+            onChange={handleStatusChange}
             showLabel
           />
         </PropertyRow>
+
+        {awaitsCurrentUserDecision && !onStageDecisionRequest ? (
+          <StageDecisionPanel
+            issue={issue}
+            decision={stageDecision}
+            onDecisionChange={setStageDecision}
+          />
+        ) : null}
 
         {/* PAP-411: priority UI is hidden behind SHOW_TASK_PRIORITY_UI. Revive by flipping the flag. */}
         {SHOW_TASK_PRIORITY_UI && (
