@@ -364,12 +364,14 @@ vi.mock("../components/IssueChatThread", () => ({
       onSelect: (runId: string) => Promise<void> | void;
     }[];
     composerPause?: TaskComposerPause | null;
+    composerAccessory?: ReactNode;
     footer?: ReactNode;
   }) => {
     mockIssueChatThreadRender(props);
     return (
       <div data-testid="issue-chat-thread">
         Chat thread
+        {props.composerAccessory}
         {props.onStopRun ? (
           <button
             type="button"
@@ -418,6 +420,7 @@ vi.mock("../components/TaskChatThread", () => ({
       onSelect: (runId: string) => Promise<void> | void;
     }[];
     composerPause?: TaskComposerPause | null;
+    composerAccessory?: ReactNode;
     footer?: ReactNode;
   }) => {
     mockIssueChatThreadRender(props);
@@ -425,6 +428,7 @@ vi.mock("../components/TaskChatThread", () => ({
       <div data-testid="task-chat-thread">
         {props.threadHeader}
         Task chat thread
+        {props.composerAccessory}
         {props.comments?.map((comment, index) => comment.metadata?.recovery ? <DispositionRecoveryNotice key={index} snapshot={comment.metadata.recovery} /> : null)}
         {props.workProducts?.map((workProduct) => (
           <RichWorkProductCard
@@ -2680,6 +2684,122 @@ describe("IssueDetail", () => {
     );
 
     mockIssuesApi.update.mockReset();
+  });
+
+  describe("stage decision for the current approver", () => {
+    function approvalIssue(overrides: Partial<Issue> = {}) {
+      return createIssue({
+        status: "in_review",
+        assigneeUserId: "user-1",
+        executionState: {
+          status: "pending",
+          currentStageId: "approval-stage",
+          currentStageIndex: 0,
+          currentStageType: "approval",
+          currentParticipant: { type: "user", agentId: null, userId: "user-1" },
+          returnAssignee: { type: "agent", agentId: "agent-1", userId: null },
+          reviewRequest: null,
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+        },
+        ...overrides,
+      });
+    }
+
+    async function renderWithAgentComment(issue: Issue) {
+      mockAuthApi.getSession.mockResolvedValue({ session: { userId: "user-1" }, user: { id: "user-1" } });
+      mockIssuesApi.get.mockResolvedValue(issue);
+      mockIssuesApi.listComments.mockResolvedValue([
+        createIssueComment({
+          id: "agent-comment-1",
+          authorType: "agent",
+          authorAgentId: "agent-1",
+          authorUserId: null,
+          body: "Ready for approval.",
+        }),
+      ]);
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={queryClient}>
+            <IssueDetail />
+          </QueryClientProvider>,
+        );
+      });
+      await flushReact();
+      await flushReact();
+    }
+
+    function lastThreadProps() {
+      return mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as {
+        suggestedAssigneeValue?: string;
+        currentAssigneeValue?: string;
+      };
+    }
+
+    it("keeps the current assignee as the composer default instead of the last agent", async () => {
+      await renderWithAgentComment(approvalIssue());
+
+      await waitForAssertion(() => {
+        expect(container.querySelector('[data-testid="stage-decision-panel"]')).not.toBeNull();
+        expect(lastThreadProps().suggestedAssigneeValue).toBe("user:user-1");
+      });
+      expect(lastThreadProps().currentAssigneeValue).toBe("user:user-1");
+    });
+
+    it("still suggests the last agent when no stage waits on the user", async () => {
+      await renderWithAgentComment(approvalIssue({ status: "in_progress", executionState: null }));
+
+      await waitForAssertion(() => {
+        expect(lastThreadProps().suggestedAssigneeValue).toBe("agent:agent-1");
+      });
+      expect(container.querySelector('[data-testid="stage-decision-panel"]')).toBeNull();
+    });
+
+    it("routes a header Done pick to the decision form and sends status and comment in one PATCH", async () => {
+      const issue = approvalIssue();
+      mockIssuesApi.update.mockImplementation(
+        async (_issueId: string, data: Record<string, unknown>) => ({ ...issue, ...data }),
+      );
+      await renderWithAgentComment(issue);
+      await waitForAssertion(() => {
+        expect(container.querySelector('[data-testid="stage-decision-panel"]')).not.toBeNull();
+      });
+
+      const statusButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Change status (current: in_review)"]',
+      );
+      expect(statusButton).not.toBeNull();
+      await act(async () => {
+        statusButton!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+      await flushReact();
+      expect(mockIssuesApi.update).not.toHaveBeenCalled();
+
+      const textarea = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Decision comment"]');
+      expect(textarea).not.toBeNull();
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
+        setter.call(textarea, "Approved after review.");
+        textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      const confirm = Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent?.trim() === "Confirm approval");
+      expect(confirm).toBeDefined();
+      await act(async () => {
+        confirm!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+
+      await waitForAssertion(() => {
+        expect(mockIssuesApi.update).toHaveBeenCalledTimes(1);
+      });
+      expect(mockIssuesApi.update).toHaveBeenCalledWith(issue.id, {
+        status: "done",
+        comment: "Approved after review.",
+      });
+
+      mockIssuesApi.update.mockReset();
+    });
   });
 
   it("moves a blocked task back to todo when the no-live-path notice tries again", async () => {

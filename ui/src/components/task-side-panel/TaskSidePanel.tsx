@@ -89,6 +89,7 @@ import { cn } from "@/lib/utils";
 import { TaskDocumentPanel } from "./TaskDocumentPanel";
 import { TaskWorkspaceFilePanel } from "./TaskWorkspaceFilePanel";
 import { TaskSkillPanel } from "./TaskSkillPanel";
+import type { IssueStageDecisionStatus } from "../../lib/issue-stage-decision";
 
 export interface TaskSidePanelProps {
   issue: Issue;
@@ -108,6 +109,7 @@ export interface TaskSidePanelProps {
   onRetryExternalObjects?: () => void;
   onCheckMonitorNow?: () => void;
   checkingMonitorNow?: boolean;
+  onStageDecisionRequest?: (status: IssueStageDecisionStatus) => void;
   fileTabsEnabled: boolean;
   documentDeepLink?: { requestId: number; documentKey: string } | null;
   /** A new durable output asks the host to reveal this tab once. */
@@ -253,6 +255,7 @@ export function TaskSidePanel({
   onRetryExternalObjects,
   onCheckMonitorNow,
   checkingMonitorNow = false,
+  onStageDecisionRequest,
   fileTabsEnabled,
   documentDeepLink,
   artifactsOpenRequestId,
@@ -740,6 +743,7 @@ export function TaskSidePanel({
         onRetryExternalObjects={onRetryExternalObjects}
         onCheckMonitorNow={onCheckMonitorNow}
         checkingMonitorNow={checkingMonitorNow}
+        onStageDecisionRequest={onStageDecisionRequest}
         sidePanelContentOnly
       />
     );

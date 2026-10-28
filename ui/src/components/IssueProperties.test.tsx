@@ -45,6 +45,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   upsertWatchdog: vi.fn(),
   deleteWatchdog: vi.fn(),
   unarchiveFromInbox: vi.fn(),
+  update: vi.fn(),
 }));
 
 const mockAuthApi = vi.hoisted(() => ({
@@ -131,8 +132,15 @@ vi.mock("../lib/assignees", () => ({
 }));
 
 vi.mock("./StatusIcon", () => ({
-  StatusIcon: ({ status, blockerAttention, className, glyphContainerClassName, size }: { status: string; blockerAttention?: Issue["blockerAttention"]; className?: string; glyphContainerClassName?: string; size?: string }) => (
-    <span className={className} data-glyph-container-class={glyphContainerClassName} data-testid="status-icon" data-size={size} data-status-icon-state={blockerAttention?.state}>{status}</span>
+  StatusIcon: ({ status, blockerAttention, className, glyphContainerClassName, size, onChange }: { status: string; blockerAttention?: Issue["blockerAttention"]; className?: string; glyphContainerClassName?: string; size?: string; onChange?: (status: string) => void }) => (
+    <>
+      <span className={className} data-glyph-container-class={glyphContainerClassName} data-testid="status-icon" data-size={size} data-status-icon-state={blockerAttention?.state}>{status}</span>
+      {onChange
+        ? ["done", "in_progress", "blocked"].map((next) => (
+          <button key={next} type="button" data-testid={`status-pick-${next}`} onClick={() => onChange(next)} />
+        ))
+        : null}
+    </>
   ),
 }));
 
@@ -607,6 +615,8 @@ describe("IssueProperties", () => {
     mockIssuesApi.upsertWatchdog.mockResolvedValue({});
     mockIssuesApi.deleteWatchdog.mockResolvedValue({ ok: true });
     mockIssuesApi.unarchiveFromInbox.mockResolvedValue({ ok: true });
+    mockIssuesApi.update.mockReset();
+    mockIssuesApi.update.mockResolvedValue({});
     mockAuthApi.getSession.mockResolvedValue({ user: { id: "user-1" } });
     mockAccessApi.listUserDirectory.mockResolvedValue({
       users: [
@@ -3728,5 +3738,178 @@ describe("IssueProperties", () => {
     });
 
     act(() => root.unmount());
+  });
+
+  describe("stage decision for the current participant", () => {
+    function approvalPendingWithMe(overrides: Partial<Issue> = {}) {
+      return createIssue({
+        status: "in_review",
+        assigneeUserId: "user-1",
+        executionPolicy: createExecutionPolicy({
+          stages: [
+            {
+              id: "approval-stage",
+              type: "approval",
+              approvalsNeeded: 1,
+              participants: [{ id: "participant-1", type: "user", agentId: null, userId: "user-1" }],
+            },
+          ],
+        }),
+        executionState: createExecutionState({
+          status: "pending",
+          currentStageId: "approval-stage",
+          currentStageType: "approval",
+          currentParticipant: { type: "user", agentId: null, userId: "user-1" },
+          returnAssignee: { type: "agent", agentId: "agent-2", userId: null },
+          lastDecisionOutcome: null,
+        }),
+        ...overrides,
+      });
+    }
+
+    function decisionPanel() {
+      return container.querySelector('[data-testid="stage-decision-panel"]') as HTMLElement | null;
+    }
+
+    function buttonByText(text: string) {
+      return Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent?.trim() === text) as HTMLButtonElement | undefined;
+    }
+
+    async function typeDecisionComment(value: string) {
+      const textarea = container.querySelector('textarea[aria-label="Decision comment"]') as HTMLTextAreaElement;
+      expect(textarea).not.toBeNull();
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
+        setter.call(textarea, value);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+
+    it("approves with one PATCH carrying status done and the comment", async () => {
+      const onUpdate = vi.fn();
+      const root = renderProperties(container, { issue: approvalPendingWithMe(), childIssues: [], onUpdate });
+      await waitForAssertion(() => expect(decisionPanel()).not.toBeNull());
+      expect(decisionPanel()!.textContent).toContain("Your approval is requested");
+
+      act(() => buttonByText("Approve")!.click());
+      const confirm = buttonByText("Confirm approval")!;
+      expect(confirm.disabled).toBe(true);
+
+      await typeDecisionComment("  Looks good, ship it.  ");
+      act(() => buttonByText("Confirm approval")!.click());
+
+      await waitForAssertion(() => expect(mockIssuesApi.update).toHaveBeenCalledTimes(1));
+      expect(mockIssuesApi.update).toHaveBeenCalledWith("issue-1", {
+        status: "done",
+        comment: "Looks good, ship it.",
+      });
+      expect(onUpdate).not.toHaveBeenCalled();
+
+      act(() => root.unmount());
+    });
+
+    it("requests changes with one PATCH carrying status in_progress and the comment", async () => {
+      const onUpdate = vi.fn();
+      const root = renderProperties(container, { issue: approvalPendingWithMe(), childIssues: [], onUpdate });
+      await waitForAssertion(() => expect(decisionPanel()).not.toBeNull());
+
+      act(() => buttonByText("Request changes")!.click());
+      await typeDecisionComment("Fix the pricing table first.");
+      act(() => buttonByText("Send back for changes")!.click());
+
+      await waitForAssertion(() => expect(mockIssuesApi.update).toHaveBeenCalledTimes(1));
+      expect(mockIssuesApi.update).toHaveBeenCalledWith("issue-1", {
+        status: "in_progress",
+        comment: "Fix the pricing table first.",
+      });
+      expect(onUpdate).not.toHaveBeenCalled();
+
+      act(() => root.unmount());
+    });
+
+    it("keeps the comment and shows the server error when the decision is rejected", async () => {
+      mockIssuesApi.update.mockRejectedValueOnce(new Error("Approving a review or approval stage requires a comment."));
+      const root = renderProperties(container, { issue: approvalPendingWithMe(), childIssues: [], onUpdate: vi.fn() });
+      await waitForAssertion(() => expect(decisionPanel()).not.toBeNull());
+
+      act(() => buttonByText("Approve")!.click());
+      await typeDecisionComment("Approved.");
+      act(() => buttonByText("Confirm approval")!.click());
+
+      await waitForAssertion(() => expect(decisionPanel()!.textContent).toContain("requires a comment"));
+      const textarea = container.querySelector('textarea[aria-label="Decision comment"]') as HTMLTextAreaElement;
+      expect(textarea.value).toBe("Approved.");
+
+      act(() => root.unmount());
+    });
+
+    it("routes done/in_progress status picks to the decision form instead of a bare status update", async () => {
+      const onUpdate = vi.fn();
+      const root = renderProperties(container, { issue: approvalPendingWithMe(), childIssues: [], onUpdate });
+      await waitForAssertion(() => expect(decisionPanel()).not.toBeNull());
+
+      act(() => (container.querySelector('[data-testid="status-pick-done"]') as HTMLButtonElement).click());
+      expect(onUpdate).not.toHaveBeenCalled();
+      expect(buttonByText("Approve")!.getAttribute("aria-pressed")).toBe("true");
+      expect(container.querySelector('textarea[aria-label="Decision comment"]')).not.toBeNull();
+
+      act(() => (container.querySelector('[data-testid="status-pick-in_progress"]') as HTMLButtonElement).click());
+      expect(onUpdate).not.toHaveBeenCalled();
+      expect(buttonByText("Request changes")!.getAttribute("aria-pressed")).toBe("true");
+
+      // Other transitions keep the board-override behavior.
+      act(() => (container.querySelector('[data-testid="status-pick-blocked"]') as HTMLButtonElement).click());
+      expect(onUpdate).toHaveBeenCalledWith({ status: "blocked" });
+      expect(mockIssuesApi.update).not.toHaveBeenCalled();
+
+      act(() => root.unmount());
+    });
+
+    it("hands status picks to the host and renders no duplicate form when the host owns the decision form", async () => {
+      const onUpdate = vi.fn();
+      const onStageDecisionRequest = vi.fn();
+      const root = renderProperties(container, {
+        issue: approvalPendingWithMe(),
+        childIssues: [],
+        onUpdate,
+        onStageDecisionRequest,
+      });
+      // No form renders in these cases, so let the session query settle first.
+      await waitForAssertion(() => expect(mockAuthApi.getSession).toHaveBeenCalled());
+      for (let i = 0; i < 5; i += 1) await flush();
+
+      act(() => (container.querySelector('[data-testid="status-pick-done"]') as HTMLButtonElement).click());
+      expect(onStageDecisionRequest).toHaveBeenCalledWith("done");
+      expect(onUpdate).not.toHaveBeenCalled();
+      expect(decisionPanel()).toBeNull();
+
+      act(() => root.unmount());
+    });
+
+    it("leaves status picks unchanged when the stage waits on someone else", async () => {
+      const onUpdate = vi.fn();
+      const root = renderProperties(container, {
+        issue: approvalPendingWithMe({
+          executionState: createExecutionState({
+            status: "pending",
+            currentStageType: "approval",
+            currentParticipant: { type: "user", agentId: null, userId: "user-2" },
+            lastDecisionOutcome: null,
+          }),
+        }),
+        childIssues: [],
+        onUpdate,
+      });
+      // No form renders in these cases, so let the session query settle first.
+      await waitForAssertion(() => expect(mockAuthApi.getSession).toHaveBeenCalled());
+      for (let i = 0; i < 5; i += 1) await flush();
+
+      expect(decisionPanel()).toBeNull();
+      act(() => (container.querySelector('[data-testid="status-pick-done"]') as HTMLButtonElement).click());
+      expect(onUpdate).toHaveBeenCalledWith({ status: "done" });
+
+      act(() => root.unmount());
+    });
   });
 });
