@@ -1381,6 +1381,22 @@ Per-agent schedule fields in `adapter_config`:
 - `enabled` boolean
 - `intervalSec` integer (minimum 30)
 - `maxConcurrentRuns` integer; new agents default to `20`; scheduler clamps configured values to `1..50`
+- `commentDebounceSec` integer (in `runtimeConfig.heartbeat`); default `120`, `0` disables
+- `commentDebounceMaxSec` integer (in `runtimeConfig.heartbeat`); default `300`, never below `commentDebounceSec`
+
+Comment wake debounce: a plain thread comment wake (`issue_commented`,
+`mutation: "comment"`) for an agent that has no queued or running run on the
+issue, and no issue execution lock, is persisted as an `agent_wakeup_requests`
+row with status `debounced_comment` instead of starting a run. Further comments
+on the same issue extend that row: the comment ids accumulate and the due time
+slides to `now + commentDebounceSec`, capped at the first comment plus
+`commentDebounceMaxSec`. The scheduler tick promotes due rows through the normal
+wake path with every held comment id in `wakeCommentIds`; because the row is in
+the database, a server restart keeps it. Interaction answers, approvals,
+assignments, blocker resolution, review requests, monitors, resume/interrupt
+comments and every other wake are never held: they dispatch immediately, then
+any held comments for the same agent and issue follow through the normal queue.
+A held wake whose issue changed assignee is cancelled.
 
 Scheduler must skip invocation when:
 
