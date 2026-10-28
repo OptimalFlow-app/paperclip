@@ -16,7 +16,9 @@
  * explicit resume, forceFreshSession, and event-carrying wake reasons bypass
  * the throttle. Human comment wakes also bypass it. Agent-authored comment
  * wakes deliberately stay in the normal throttle class so a cross-issue write
- * cannot smuggle human wake privileges.
+ * cannot smuggle human wake privileges. Agent-authored comments also never
+ * count as progress or new input, so two agents replying to each other are
+ * slowed down like any other no-op loop.
  *
  * Server-side recovery retries (process-loss retries, missing-comment
  * follow-ups) insert their runs directly and never pass through this gate, so
@@ -56,8 +58,9 @@ export const THROTTLED_ISSUE_REWAKE_REASONS: ReadonlySet<string> = new Set([
  * Activity actions that count as issue-visible progress when attributed to a
  * run. Deliberately narrower than run-liveness "concrete action evidence":
  * tool calls inside the workspace do not move the issue, so they do not reset
- * the streak — a run must leave a comment, mutation, document, work product,
- * interaction, or scheduled continuation behind.
+ * the streak — a run must leave a mutation, document, work product,
+ * interaction, or scheduled continuation behind. Agent-authored comments are
+ * filtered out by `countsAsIssueProgressActivity`.
  */
 export const ISSUE_PROGRESS_ACTIVITY_ACTIONS: string[] = [
   "issue.updated",
@@ -96,6 +99,22 @@ export const ISSUE_NEW_INPUT_ACTIVITY_ACTIONS: string[] = [
   "issue.thread_interaction_item_verdicts_submitted",
   "issue.blockers_resolved_wake_emitted",
 ];
+
+export const ISSUE_COMMENT_ADDED_ACTION = "issue.comment_added";
+
+/**
+ * Two agents answering each other only ever leave comments behind, so an
+ * agent-authored comment is neither progress nor new input: otherwise each
+ * reply resets the other side's streak and the ping-pong never slows down.
+ * Human (and system) comments, and every other progress action, still count.
+ */
+export function countsAsIssueProgressActivity(row: {
+  action: string;
+  actorType: string | null;
+}): boolean {
+  if (row.action === ISSUE_COMMENT_ADDED_ACTION && row.actorType === "agent") return false;
+  return ISSUE_PROGRESS_ACTIVITY_ACTIONS.includes(row.action);
+}
 
 export interface IssueRewakeCandidateInput {
   reason: string | null;
@@ -179,4 +198,38 @@ export function evaluateIssueRewakeThrottle(input: IssueRewakeThrottleInput): Is
     return { blocked: true, noProgressStreak, cooldownMs, lastRunFinishedAt, nextAllowedAt };
   }
   return { blocked: false, noProgressStreak };
+}
+
+/**
+ * `runtimeConfig.heartbeat.cooldownSec`: minimum spacing between two runs of
+ * the same agent on the same issue when the wake comes from another agent.
+ * Human-originated wakes (comments, interaction answers, board assignments),
+ * system wakes and the agent's own wakes are never held back by it.
+ */
+export function isAgentWakeCooldownCandidate(input: {
+  agentId: string;
+  cooldownSec: number;
+  requestedByActorType?: "user" | "agent" | "system" | null;
+  requestedByActorId?: string | null;
+}): boolean {
+  if (!(input.cooldownSec > 0)) return false;
+  if (input.requestedByActorType !== "agent") return false;
+  return input.requestedByActorId !== input.agentId;
+}
+
+export type AgentWakeCooldownDecision =
+  | { blocked: false }
+  | { blocked: true; cooldownMs: number; lastRunFinishedAt: Date; nextAllowedAt: Date };
+
+export function evaluateAgentWakeCooldown(input: {
+  now: Date;
+  cooldownSec: number;
+  /** Finish time of the newest terminal run of this agent on this issue. */
+  lastRunFinishedAt: Date | null;
+}): AgentWakeCooldownDecision {
+  if (!input.lastRunFinishedAt || !(input.cooldownSec > 0)) return { blocked: false };
+  const cooldownMs = input.cooldownSec * 1000;
+  const nextAllowedAt = new Date(input.lastRunFinishedAt.getTime() + cooldownMs);
+  if (input.now.getTime() >= nextAllowedAt.getTime()) return { blocked: false };
+  return { blocked: true, cooldownMs, lastRunFinishedAt: input.lastRunFinishedAt, nextAllowedAt };
 }
