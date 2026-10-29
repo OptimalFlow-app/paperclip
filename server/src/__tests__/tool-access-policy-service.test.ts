@@ -32,6 +32,9 @@ import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { toolAccessService } from "../services/tool-access.js";
 import { createToolGatewayService, ToolGatewayHttpError } from "../services/tool-gateway.js";
 
+// The demo MCP fixtures (mcp-remote-fixture, mcp-stdio-fixture) are hidden unless this flag is set.
+process.env.PAPERCLIP_TOOL_GATEWAY_FIXTURES = "1";
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
