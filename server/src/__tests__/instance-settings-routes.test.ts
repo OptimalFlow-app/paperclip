@@ -674,6 +674,30 @@ describe("instance settings routes", () => {
     expect(mockInstanceSettingsService.updateGeneral).not.toHaveBeenCalled();
   });
 
+  it("updates the instance concurrent-run cap and rejects values below 1", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "local-board",
+      source: "local_implicit",
+      isInstanceAdmin: true,
+    });
+
+    const okRes = await request(app)
+      .patch("/api/instance/settings/general")
+      .send({ maxConcurrentRuns: 2 });
+    expect(okRes.status).toBe(200);
+    expect(mockInstanceSettingsService.updateGeneral).toHaveBeenCalledWith({ maxConcurrentRuns: 2 });
+
+    mockInstanceSettingsService.updateGeneral.mockClear();
+    for (const invalid of [0, -1, 1.5, "3"]) {
+      const res = await request(app)
+        .patch("/api/instance/settings/general")
+        .send({ maxConcurrentRuns: invalid });
+      expect(res.status).toBe(400);
+    }
+    expect(mockInstanceSettingsService.updateGeneral).not.toHaveBeenCalled();
+  });
+
   describe("executionMode floor on cloud-managed instances", () => {
     const adminActor = {
       type: "board",

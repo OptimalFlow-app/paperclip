@@ -15,6 +15,9 @@ export const DEFAULT_BACKUP_RETENTION: BackupRetentionPolicy = {
   monthlyMonths: 1,
 };
 
+/** Default instance-wide cap on heartbeat runs in `running` at the same time. */
+export const DEFAULT_INSTANCE_MAX_CONCURRENT_RUNS = 3;
+
 /**
  * Instance-wide execution policy.
  *
@@ -37,6 +40,11 @@ export interface InstanceGeneralSettings {
    * Kubernetes sandbox provider and denies local/ssh execution.
    */
   executionMode?: InstanceExecutionMode;
+  /**
+   * Instance-wide cap on heartbeat runs in `running` at the same time (≥ 1).
+   * Runs over the cap stay `queued`. `PAPERCLIP_MAX_CONCURRENT_RUNS` overrides it.
+   */
+  maxConcurrentRuns: number;
 }
 
 export interface InstanceExperimentalSettings {
