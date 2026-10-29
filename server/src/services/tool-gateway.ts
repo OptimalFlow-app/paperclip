@@ -1074,6 +1074,21 @@ const VIRTUAL_RUN_TOOL: ToolGatewayDescriptor = {
 
 const VIRTUAL_TOOLS = [VIRTUAL_SEARCH_TOOLS, VIRTUAL_RUN_TOOL];
 
+const FIXTURE_PROVIDER_TYPES = new Set<ToolGatewayDescriptor["providerType"]>([
+  "mcp_http_fixture",
+  "mcp_stdio_fixture",
+]);
+
+/**
+ * The demo MCP fixtures are test scaffolding, not connections: the board cannot
+ * remove them, and their schemas would weigh on every agent run. Expose them only
+ * when PAPERCLIP_TOOL_GATEWAY_FIXTURES is enabled.
+ */
+export function toolGatewayFixturesEnabledFromEnv(env: NodeJS.ProcessEnv = process.env) {
+  const raw = env.PAPERCLIP_TOOL_GATEWAY_FIXTURES?.trim().toLowerCase();
+  return raw === "1" || raw === "true";
+}
+
 export function createToolGatewayService(
   db: Db,
   options: {
@@ -1116,8 +1131,14 @@ export function createToolGatewayService(
       sessionSetup: Partial<McpGatewayRateLimitConfig>;
     }>;
     now?: () => number;
+    /** Exposes the mcp-remote/stdio fixture tools. Defaults to PAPERCLIP_TOOL_GATEWAY_FIXTURES. */
+    exposeFixtureTools?: boolean;
   } = {},
 ) {
+  const exposeFixtureTools = options.exposeFixtureTools ?? toolGatewayFixturesEnabledFromEnv();
+  const builtinTools = exposeFixtureTools
+    ? BUILTIN_TOOLS
+    : BUILTIN_TOOLS.filter((tool) => !FIXTURE_PROVIDER_TYPES.has(tool.providerType));
   // Authorization links can contain one-time codes. Keep them briefly in memory;
   // persist only the redacted request and execution identifiers for recovery.
   const upstreamHandoffs = new Map<string, { pending: ToolUpstreamPending; expires: number }>();
@@ -1259,7 +1280,7 @@ export function createToolGatewayService(
   }
 
   function allTools(): ToolGatewayDescriptor[] {
-    return [...BUILTIN_TOOLS, ...pluginTools()];
+    return [...builtinTools, ...pluginTools()];
   }
 
   function connectedMcpConnectionFilter(companyId: string) {
