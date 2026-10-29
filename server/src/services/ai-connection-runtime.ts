@@ -1,8 +1,10 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { HttpError, unprocessable } from "../errors.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { and, eq } from "drizzle-orm";
 import { type Db, companySecrets, connectionGrants } from "@paperclipai/db";
 import {
@@ -174,6 +176,8 @@ done`,
   }
 }
 
+const execFileAsync = promisify(execFile);
+
 function managedAiHomeEnvironment(home: string): Record<string, string> {
   const providerHome = path.join(home, "provider");
   return {
@@ -185,6 +189,27 @@ function managedAiHomeEnvironment(home: string): Record<string, string> {
     CLAUDE_CONFIG_DIR: providerHome,
     HERMES_HOME: providerHome,
   };
+}
+
+/**
+ * macOS resolves the default keychain from $HOME. A bare managed home has none,
+ * so every agent-launched Chrome (or any Security.framework caller) fails with
+ * errSecNoDefaultKeychain and the OS opens a "Keychain Not Found" dialog on the
+ * operator's screen. Seed an empty, never-locking keychain local to the
+ * disposable home; the operator's own keychain stays out of reach.
+ */
+export async function seedManagedHomeKeychain(home: string): Promise<void> {
+  if (process.platform !== "darwin") return;
+  const keychainDir = path.join(home, "Library", "Keychains");
+  const keychain = path.join(keychainDir, "login.keychain-db");
+  const env = { ...process.env, HOME: home };
+  try {
+    await mkdir(keychainDir, { recursive: true, mode: 0o700 });
+    await execFileAsync("security", ["create-keychain", "-p", "", keychain], { env });
+    await execFileAsync("security", ["set-keychain-settings", keychain], { env });
+  } catch {
+    // Best effort: without it agents still run, only the dialog comes back.
+  }
 }
 
 /** Only the server-created credential home is volatile; retain all other config. */
@@ -303,6 +328,7 @@ export async function prepareManagedAiRuntime(
         `paperclip-ai-${input.companyId}-${selection.grant.id}-`,
       ),
     );
+    await seedManagedHomeKeychain(home);
     const providerHome = path.join(home, "provider");
     await mkdir(providerHome, { mode: 0o700 });
     const env: Record<string, unknown> = {
