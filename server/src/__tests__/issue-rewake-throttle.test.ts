@@ -4,7 +4,10 @@ import {
   ISSUE_REWAKE_MAX_COOLDOWN_MS,
   ISSUE_REWAKE_NO_PROGRESS_THRESHOLD,
   computeIssueRewakeCooldownMs,
+  countsAsIssueProgressActivity,
+  evaluateAgentWakeCooldown,
   evaluateIssueRewakeThrottle,
+  isAgentWakeCooldownCandidate,
   isThrottleCandidateIssueRewake,
 } from "../services/issue-rewake-throttle.ts";
 
@@ -205,5 +208,56 @@ describe("evaluateIssueRewakeThrottle", () => {
       hasNewIssueInputSinceLastRun: true,
     });
     expect(decision).toEqual({ blocked: false, noProgressStreak: 0 });
+  });
+});
+
+describe("countsAsIssueProgressActivity", () => {
+  it("does not count agent-authored comments as progress", () => {
+    expect(countsAsIssueProgressActivity({ action: "issue.comment_added", actorType: "agent" })).toBe(false);
+  });
+
+  it("keeps human and system comments and every other progress action", () => {
+    expect(countsAsIssueProgressActivity({ action: "issue.comment_added", actorType: "user" })).toBe(true);
+    expect(countsAsIssueProgressActivity({ action: "issue.comment_added", actorType: "system" })).toBe(true);
+    for (const action of [
+      "issue.updated",
+      "issue.document_upserted",
+      "issue.work_product_created",
+      "issue.thread_interaction_created",
+    ]) {
+      expect(countsAsIssueProgressActivity({ action, actorType: "agent" })).toBe(true);
+    }
+  });
+
+  it("ignores actions outside the progress list", () => {
+    expect(countsAsIssueProgressActivity({ action: "issue.read_marked", actorType: "user" })).toBe(false);
+  });
+});
+
+describe("agent wake cooldown", () => {
+  const agentId = "agent-b";
+
+  it("only applies to wakes requested by another agent with a positive cooldown", () => {
+    const base = { agentId, cooldownSec: 60, requestedByActorType: "agent" as const, requestedByActorId: "agent-a" };
+    expect(isAgentWakeCooldownCandidate(base)).toBe(true);
+    expect(isAgentWakeCooldownCandidate({ ...base, requestedByActorType: "user", requestedByActorId: "board" })).toBe(false);
+    expect(isAgentWakeCooldownCandidate({ ...base, requestedByActorType: "system" })).toBe(false);
+    expect(isAgentWakeCooldownCandidate({ ...base, requestedByActorType: null })).toBe(false);
+    expect(isAgentWakeCooldownCandidate({ ...base, requestedByActorId: agentId })).toBe(false);
+    expect(isAgentWakeCooldownCandidate({ ...base, cooldownSec: 0 })).toBe(false);
+  });
+
+  it("blocks until cooldownSec has elapsed since the last run finished", () => {
+    const lastRunFinishedAt = new Date(NOW.getTime() - 20_000);
+    const blocked = evaluateAgentWakeCooldown({ now: NOW, cooldownSec: 60, lastRunFinishedAt });
+    expect(blocked).toEqual({
+      blocked: true,
+      cooldownMs: 60_000,
+      lastRunFinishedAt,
+      nextAllowedAt: new Date(lastRunFinishedAt.getTime() + 60_000),
+    });
+    expect(evaluateAgentWakeCooldown({ now: NOW, cooldownSec: 20, lastRunFinishedAt })).toEqual({ blocked: false });
+    expect(evaluateAgentWakeCooldown({ now: NOW, cooldownSec: 60, lastRunFinishedAt: null })).toEqual({ blocked: false });
+    expect(evaluateAgentWakeCooldown({ now: NOW, cooldownSec: 0, lastRunFinishedAt })).toEqual({ blocked: false });
   });
 });

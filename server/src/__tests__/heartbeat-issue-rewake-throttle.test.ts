@@ -112,7 +112,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     await tempDb?.cleanup();
   });
 
-  async function seedCompanyAgentIssue() {
+  async function seedCompanyAgentIssue(heartbeatConfig: Record<string, unknown> = {}) {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
@@ -136,6 +136,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
         heartbeat: {
           wakeOnDemand: true,
           maxConcurrentRuns: 1,
+          ...heartbeatConfig,
         },
       },
       permissions: {},
@@ -377,7 +378,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       actorId: agentId,
       agentId,
       runId: progressRunId,
-      action: "issue.comment_added",
+      action: "issue.updated",
       entityType: "issue",
       entityId: issueId,
       createdAt: new Date(Date.now() - 11_000),
@@ -408,7 +409,7 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
       actorId: agentId,
       agentId,
       runId: progressRunId,
-      action: "issue.comment_added",
+      action: "issue.updated",
       entityType: "issue",
       entityId: otherIssueId,
       createdAt: new Date(Date.now() - 11_000),
@@ -417,6 +418,135 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     const wake = await assignmentWake(agentId, issueId);
     expect(wake).toBeNull();
     expect((await latestWakeRequest(agentId))?.reason).toBe("issue_rewake_throttled");
+  });
+
+  async function seedPeerAgent(companyId: string) {
+    const peerAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: peerAgentId,
+      companyId,
+      name: "PeerReviewer",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    return peerAgentId;
+  }
+
+  async function logComment(input: {
+    companyId: string;
+    issueId: string;
+    actorType: "agent" | "user";
+    actorId: string;
+    runId?: string;
+    createdAt?: Date;
+  }) {
+    await db.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: input.actorType,
+      actorId: input.actorId,
+      agentId: input.actorType === "agent" ? input.actorId : null,
+      runId: input.runId ?? null,
+      action: "issue.comment_added",
+      entityType: "issue",
+      entityId: input.issueId,
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    });
+  }
+
+  function commentWake(agentId: string, issueId: string, actor: { type: "agent" | "user"; id: string }) {
+    const commentId = randomUUID();
+    return heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_commented",
+      payload: { issueId, commentId },
+      contextSnapshot: { issueId, wakeReason: "issue_commented", wakeCommentId: commentId },
+      requestedByActorType: actor.type,
+      requestedByActorId: actor.id,
+    });
+  }
+
+  it("brakes an agent-to-agent comment ping-pong after the no-progress threshold", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const peerAgentId = await seedPeerAgent(companyId);
+
+    // Two rounds where the agent only answered the peer with a comment and the
+    // peer replied each time. Before this fix each comment reset the streak.
+    const firstRunId = await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 60 });
+    await logComment({ companyId, issueId, actorType: "agent", actorId: agentId, runId: firstRunId,
+      createdAt: new Date(Date.now() - 62_000) });
+    await logComment({ companyId, issueId, actorType: "agent", actorId: peerAgentId,
+      createdAt: new Date(Date.now() - 50_000) });
+    const secondRunId = await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 10 });
+    await logComment({ companyId, issueId, actorType: "agent", actorId: agentId, runId: secondRunId,
+      createdAt: new Date(Date.now() - 12_000) });
+    await logComment({ companyId, issueId, actorType: "agent", actorId: peerAgentId });
+
+    const brakedWake = await commentWake(agentId, issueId, { type: "agent", id: peerAgentId });
+    expect(brakedWake).toBeNull();
+    const skipped = await latestWakeRequest(agentId);
+    expect(skipped?.reason).toBe("issue_rewake_throttled");
+    expect(
+      ((skipped?.payload as Record<string, unknown> | null)?.heartbeatSkip as Record<string, unknown>)
+        ?.noProgressStreak,
+    ).toBe(2);
+
+    // The peer's comment does not unlock an event-free state poll either.
+    expect(await assignmentWake(agentId, issueId)).toBeNull();
+  });
+
+  it("lets a human comment reset the streak during an agent ping-pong", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue();
+    const peerAgentId = await seedPeerAgent(companyId);
+
+    const firstRunId = await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 40 });
+    const secondRunId = await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 10 });
+    await logComment({ companyId, issueId, actorType: "agent", actorId: agentId, runId: firstRunId,
+      createdAt: new Date(Date.now() - 41_000) });
+    await logComment({ companyId, issueId, actorType: "agent", actorId: agentId, runId: secondRunId,
+      createdAt: new Date(Date.now() - 11_000) });
+    await logComment({ companyId, issueId, actorType: "agent", actorId: peerAgentId });
+
+    expect(await commentWake(agentId, issueId, { type: "agent", id: peerAgentId })).toBeNull();
+
+    // A founder steps in: the next agent-originated wake goes through again.
+    await logComment({ companyId, issueId, actorType: "user", actorId: "board-user" });
+    expect(await commentWake(agentId, issueId, { type: "agent", id: peerAgentId })).not.toBeNull();
+  });
+
+  it("holds agent-originated wakes for cooldownSec but never human-originated ones", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue({ cooldownSec: 300 });
+    const peerAgentId = await seedPeerAgent(companyId);
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 30 });
+
+    const agentWake = await commentWake(agentId, issueId, { type: "agent", id: peerAgentId });
+    expect(agentWake).toBeNull();
+    const skipped = await latestWakeRequest(agentId);
+    expect(skipped?.status).toBe("skipped");
+    expect(skipped?.reason).toBe("issue_agent_wake_cooldown");
+    const heartbeatSkip = (skipped?.payload as Record<string, unknown> | null)?.heartbeatSkip as
+      | Record<string, unknown>
+      | undefined;
+    expect(heartbeatSkip?.cooldownMs).toBe(300_000);
+    expect(heartbeatSkip?.requestedReason).toBe("issue_commented");
+
+    // System wakes (assignment pollers, reconcilers) are not subject to it.
+    expect(await assignmentWake(agentId, issueId)).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+
+    expect(await commentWake(agentId, issueId, { type: "user", id: "board-user" })).not.toBeNull();
+  });
+
+  it("admits agent-originated wakes once cooldownSec has elapsed", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue({ cooldownSec: 20 });
+    const peerAgentId = await seedPeerAgent(companyId);
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 30 });
+
+    expect(await commentWake(agentId, issueId, { type: "agent", id: peerAgentId })).not.toBeNull();
   });
 
   it("counts a long-running session that finished inside the lookback window", async () => {

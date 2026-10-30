@@ -393,11 +393,15 @@ import {
   type RunLivenessClassificationInput,
 } from "./run-liveness.js";
 import {
+  ISSUE_COMMENT_ADDED_ACTION,
   ISSUE_NEW_INPUT_ACTIVITY_ACTIONS,
   ISSUE_PROGRESS_ACTIVITY_ACTIONS,
   ISSUE_REWAKE_LOOKBACK_MS,
   ISSUE_REWAKE_RUN_SAMPLE_LIMIT,
+  countsAsIssueProgressActivity,
+  evaluateAgentWakeCooldown,
   evaluateIssueRewakeThrottle,
+  isAgentWakeCooldownCandidate,
   isThrottleCandidateIssueRewake,
 } from "./issue-rewake-throttle.js";
 import {
@@ -16867,6 +16871,7 @@ export function heartbeatService(
     return {
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
+      cooldownSec: Math.max(0, asNumber(heartbeat.cooldownSec, 0)),
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
       maxConcurrentRuns: normalizeMaxConcurrentRuns(
         heartbeat.maxConcurrentRuns,
@@ -28689,7 +28694,11 @@ export function heartbeatService(
                 (sampleRun) => sampleRun.id,
               );
               const progressRows = await tx
-                .select({ runId: activityLog.runId })
+                .select({
+                  runId: activityLog.runId,
+                  action: activityLog.action,
+                  actorType: activityLog.actorType,
+                })
                 .from(activityLog)
                 .where(
                   and(
@@ -28721,7 +28730,10 @@ export function heartbeatService(
                         ),
                         wakeCommentId && opts.requestedByActorType === "agent"
                           ? ne(activityLog.actorType, "agent")
-                          : undefined,
+                          : or(
+                              ne(activityLog.action, ISSUE_COMMENT_ADDED_ACTION),
+                              ne(activityLog.actorType, "agent"),
+                            ),
                       ),
                     )
                     .limit(1)
@@ -28732,6 +28744,7 @@ export function heartbeatService(
                 recentTerminalRuns,
                 runIdsWithIssueProgress: new Set(
                   progressRows
+                    .filter(countsAsIssueProgressActivity)
                     .map((row) => row.runId)
                     .filter((runId): runId is string => Boolean(runId)),
                 ),
@@ -28772,6 +28785,67 @@ export function heartbeatService(
                 });
                 return { kind: "skipped" as const };
               }
+            }
+          }
+
+          // runtimeConfig.heartbeat.cooldownSec spaces out runs of
+          // this agent on this issue when another agent triggers them. Human
+          // and system wakes never reach this gate's blocking branch.
+          if (
+            isAgentWakeCooldownCandidate({
+              agentId,
+              cooldownSec: policy.cooldownSec,
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+            })
+          ) {
+            const cooldownNow = new Date();
+            const lastIssueRun = await tx
+              .select({ finishedAt: heartbeatRuns.finishedAt })
+              .from(heartbeatRuns)
+              .where(
+                and(
+                  eq(heartbeatRuns.companyId, agent.companyId),
+                  eq(heartbeatRuns.agentId, agentId),
+                  sql`${heartbeatRuns.finishedAt} is not null`,
+                  sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+                ),
+              )
+              .orderBy(desc(heartbeatRuns.finishedAt))
+              .limit(1)
+              .then((rows) => rows[0] ?? null);
+            const cooldownDecision = evaluateAgentWakeCooldown({
+              now: cooldownNow,
+              cooldownSec: policy.cooldownSec,
+              lastRunFinishedAt: lastIssueRun?.finishedAt ?? null,
+            });
+            if (cooldownDecision.blocked) {
+              await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields,
+                companyId: agent.companyId,
+                agentId,
+                source,
+                triggerDetail,
+                reason: "issue_agent_wake_cooldown",
+                payload: {
+                  ...(payload ?? {}),
+                  issueId,
+                  heartbeatSkip: {
+                    reason: "issue_agent_wake_cooldown",
+                    requestedReason: reason,
+                    cooldownMs: cooldownDecision.cooldownMs,
+                    lastRunFinishedAt:
+                      cooldownDecision.lastRunFinishedAt.toISOString(),
+                    nextAllowedAt: cooldownDecision.nextAllowedAt.toISOString(),
+                  },
+                },
+                status: "skipped",
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null,
+                finishedAt: cooldownNow,
+              });
+              return { kind: "skipped" as const };
             }
           }
 
