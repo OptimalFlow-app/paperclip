@@ -67,7 +67,13 @@ export async function persistUsageReceipt(db: Db, raw: UsageReceiptEnvelope) {
     const previous = run.usageJson ?? {};
     // A restarted/replaced controller owns a fresh source. Old spool files
     // remain auditable but cannot overwrite its snapshots or acknowledged work.
-    if (run.costAccountedAt || previous.accountingReceiptSourceId !== envelope.sourceId || Number(previous.accountingReceiptSequence ?? 0) >= envelope.sequence) return;
+    if (run.costAccountedAt) {
+      // A subscription run can settle without its receipt (timeout). A late
+      // receipt stays in the journal but cannot reopen acknowledged work.
+      logger.info({ runId: run.id, receiptId: envelope.id, costAccountedAt: run.costAccountedAt }, "Late usage receipt for an accounted run ignored");
+      return;
+    }
+    if (previous.accountingReceiptSourceId !== envelope.sourceId || Number(previous.accountingReceiptSequence ?? 0) >= envelope.sequence) return;
     const receipt = envelope.receipt;
     const billingType = receipt.billingType === "api" ? "metered_api" : receipt.billingType === "subscription" ? "subscription_included" : receipt.billingType ?? "unknown";
     await tx.update(heartbeatRuns).set({

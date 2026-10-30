@@ -62,8 +62,12 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
     }
     // A stop can mark the run terminal before the provider's shutdown receipt
     // arrives. Keep the debt pending instead of acknowledging an invented zero
-    // and permanently discarding that late receipt.
-    if (!preProviderFailure && object(run.usageJson).accountingReceiptReady === false) return false;
+    // and permanently discarding that late receipt. Subscription billing is
+    // free by definition: a run killed before its receipt (timeout) cannot
+    // hide billable spend, so it settles at zero with the tokens observed.
+    const receiptMissing = !preProviderFailure && object(run.usageJson).accountingReceiptReady === false;
+    const subscriptionWithoutReceipt = receiptMissing && object(run.usageJson).billingType === "subscription_included";
+    if (receiptMissing && !subscriptionWithoutReceipt) return false;
     // Acknowledgement is part of the same transaction. Budget checks inside
     // this transaction must not mistake this receipt for missing accounting.
     await tx.update(heartbeatRuns).set({ costAccountingPending: false, costAccountedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
@@ -97,7 +101,7 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
       providerRequestId: text(usage.providerRequestId),
       pricingProvenance: object(usage.pricingProvenance),
       model: text(usage.model) ?? "unknown", billingType,
-      costStatus: (costUsd === null || usage.costStatus === "unpriced") && billingType !== "subscription_included" && hasBillableEvidence ? "unpriced" : usage.costStatus === "estimated" ? "estimated" : "reported",
+      costStatus: (costUsd === null || usage.costStatus === "unpriced") && billingType !== "subscription_included" && hasBillableEvidence ? "unpriced" : usage.costStatus === "estimated" || subscriptionWithoutReceipt ? "estimated" : "reported",
       inputTokens: amount(usage.inputTokens) ?? 0, cachedInputTokens: amount(usage.cachedInputTokens) ?? 0, outputTokens: amount(usage.outputTokens) ?? 0,
       costCents, occurredAt: run.finishedAt ?? run.createdAt,
     };
@@ -163,7 +167,8 @@ export async function reconcileRunCosts(db: Db, hooks: BudgetServiceHooks = {}) 
       or not exists (select 1 from ${nativeRunFinalizations} where ${nativeRunFinalizations.runId} = ${heartbeatRuns.id}
       and ${heartbeatRuns.runtimeMode} = 'native' and ${nativeRunFinalizations.resultId} is null
       and ${nativeRunFinalizations.phase} <> 'terminal_failure'))`,
-    sql`(${heartbeatRuns.usageJson}->>'accountingReceiptReady' is distinct from 'false' or ${heartbeatRuns.resultJson}->'executionRecovery'->>'providerWorkStarted' = 'false' or ${heartbeatRuns.usageJson}->>'accountingProviderWorkStarted' = 'false')`,
+    sql`(${heartbeatRuns.usageJson}->>'accountingReceiptReady' is distinct from 'false' or ${heartbeatRuns.resultJson}->'executionRecovery'->>'providerWorkStarted' = 'false' or ${heartbeatRuns.usageJson}->>'accountingProviderWorkStarted' = 'false'
+      or ${heartbeatRuns.usageJson}->>'billingType' = 'subscription_included')`,
   )).orderBy(asc(heartbeatRuns.updatedAt), asc(heartbeatRuns.id)).limit(100);
   let accounted = 0;
   const receiptIndex = pending.length > 0 ? await indexPendingUsageReceipts() : undefined;
