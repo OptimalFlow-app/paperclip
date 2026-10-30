@@ -4756,6 +4756,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       // Receipt persistence is fallible; retain the provider evidence before
       // calling the sink so the failure result can still return it to the host.
       let observedUsage: Pick<AdapterExecutionResult, "usage" | "usageBasis" | "costUsd" | "usageComplete"> = { usageComplete: false };
+      // ACP `usage_update.used` is the live context size, which the server
+      // compares with the session rotation ceiling before the next resume.
+      let sessionContextTokens: number | null = null;
       let lastRuntimeEventAt: number | null = null;
       let observedRuntimeEvents = 0;
       let turnDispatchAttempted = false;
@@ -4961,6 +4964,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             }
             if (event.type === "status" && event.tag === "usage_update") {
               eventBreakdown = event.breakdown ?? eventBreakdown;
+              if (typeof event.used === "number" && Number.isFinite(event.used) && event.used >= 0) {
+                sessionContextTokens = Math.floor(event.used);
+              }
               eventCostUsd = usdCostAmount(event.cost) ?? eventCostUsd;
               const checkpoint = summarizeAcpxTurnUsage({ preStatus: preTurnStatus, postStatus: null, eventBreakdown, eventCostUsd });
               observedUsage = { usage: checkpoint.usage ?? undefined, costUsd: checkpoint.costUsd, usageBasis: "per_run", usageComplete: false };
@@ -5142,6 +5148,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           ...referencedProjectStagingFailuresField,
           model: prepared.requestedModel || null,
           ...(turnUsage.usage ? { usage: turnUsage.usage, usageBasis: "per_run" as const } : {}),
+          ...(sessionContextTokens !== null ? { sessionContextTokens } : {}),
           costUsd: turnUsage.costUsd,
           usageComplete,
           resultJson: {
@@ -5278,6 +5285,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           errorCode: timedOut ? "acpx_timeout" : (emitted?.classified.errorCode ?? null),
           errorMeta: emitted?.classified.errorMeta,
           ...observedUsage,
+          ...(sessionContextTokens !== null ? { sessionContextTokens } : {}),
           ...(!turnDispatchAttempted ? { executionRecovery: { kind: "bootstrap" as const, providerWorkStarted: false as const } } : {}),
           ...billingFields,
           ...referencedProjectStagingFailuresField,

@@ -71,7 +71,7 @@ import {
 import { executionFailureRetryCount, executionRetryAttemptCount, accountingForScheduledRetry } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
-import { buildExecutionContinuation, StaleExecutionContinuationError } from "./execution-continuation.js";
+import { buildExecutionContinuation, resolveContinuationHistoryLimit, StaleExecutionContinuationError } from "./execution-continuation.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { PROJECT_REPOSITORIES_DIR, readGitWorkspaceSnapshot, disposeGitWorkspaceSnapshot } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { isWorkspaceGitScanError, WorkspaceGitScanError, WORKSPACE_GIT_SCAN_ERROR_CODES } from "./workspace-git-operation-scheduler.js";
@@ -12269,6 +12269,7 @@ export function heartbeatService(
     // separate cache counter when the writer explicitly saved exclusive input.
     const latestRawInputTokens = (latestRawUsage?.inputTokens ?? 0) +
       (latestRun?.usageJson?.rawInputIncludesCached === false ? latestRawUsage?.cachedInputTokens ?? 0 : 0);
+    const latestContextTokens = asNumber(latestRun?.usageJson?.sessionContextTokens, 0);
     const sessionAgeHours =
       latestRun && oldestRun
         ? Math.max(
@@ -12290,6 +12291,13 @@ export function heartbeatService(
       reason =
         `session raw input reached ${formatCount(latestRawInputTokens)} tokens ` +
         `(threshold ${formatCount(policy.maxRawInputTokens)})`;
+    } else if (
+      (policy.maxSessionContextTokens ?? 0) > 0 &&
+      latestContextTokens >= policy.maxSessionContextTokens!
+    ) {
+      reason =
+        `session context reached ${formatCount(latestContextTokens)} tokens ` +
+        `(threshold ${formatCount(policy.maxSessionContextTokens!)})`;
     } else if (
       policy.maxSessionAgeHours > 0 &&
       sessionAgeHours >= policy.maxSessionAgeHours
@@ -21253,6 +21261,7 @@ export function heartbeatService(
               previousContextRunId: taskSession?.lastRunId,
               summary: safeContinuationSummary?.body ?? null,
               exposeLowTrustRaw,
+              maxHistoryComments: resolveContinuationHistoryLimit(agent.runtimeConfig),
             })
           : null;
       context.executionContinuation = executionContinuation;
@@ -25770,6 +25779,11 @@ export function heartbeatService(
                 rawCachedInputTokens: rawUsage.cachedInputTokens,
                 rawOutputTokens: rawUsage.outputTokens,
               }
+            : {}),
+          ...(typeof adapterResult.sessionContextTokens === "number" &&
+          Number.isFinite(adapterResult.sessionContextTokens) &&
+          adapterResult.sessionContextTokens >= 0
+            ? { sessionContextTokens: Math.floor(adapterResult.sessionContextTokens) }
             : {}),
           ...(sessionUsageResolution.derivedFromSessionTotals
             ? { usageSource: "session_delta" }

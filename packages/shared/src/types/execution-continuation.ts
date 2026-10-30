@@ -60,9 +60,18 @@ export interface ExecutionContinuationEnvelope {
   }>;
   unresolvedInteractionIds: string[];
   coverage: {
-    kind: "full_task_history" | "task_history_delta";
+    /**
+     * `bounded_task_history` keeps the latest comments, wake origins, the
+     * latest user request and comments since the agent's previous run; older
+     * comments are omitted and covered by `completedWork`.
+     */
+    kind: "full_task_history" | "bounded_task_history" | "task_history_delta";
     baseRunId?: string;
     throughCommentId: string | null;
     summaryThroughCommentId: null;
+    /** Comments left out of `messages` by the history bound. */
+    omittedCommentCount?: number;
+    /** Newest omitted comment, so a reader can fetch older history up to it. */
+    omittedThroughCommentId?: string;
   };
 }

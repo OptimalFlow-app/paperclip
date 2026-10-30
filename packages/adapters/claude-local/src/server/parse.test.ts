@@ -581,3 +581,18 @@ describe("interrupted Claude accounting", () => {
     expect(parsed.costUsd).toBeNull();
   });
 });
+
+describe("parseClaudeStreamJson context size", () => {
+  it("reports the latest main-loop prompt size, ignoring subagent sidechains", () => {
+    const line = (value: unknown) => JSON.stringify(value);
+    const stdout = [
+      line({ type: "system", subtype: "init", session_id: "s-1", model: "claude" }),
+      line({ type: "assistant", session_id: "s-1", message: { id: "m1", usage: { input_tokens: 10, cache_creation_input_tokens: 1_000, cache_read_input_tokens: 40_000, output_tokens: 5 } } }),
+      line({ type: "assistant", session_id: "s-1", message: { id: "m2", usage: { input_tokens: 20, cache_creation_input_tokens: 2_000, cache_read_input_tokens: 41_000, output_tokens: 5 } } }),
+      line({ type: "assistant", session_id: "s-1", parent_tool_use_id: "tool-1", message: { id: "m3", usage: { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 9_000, output_tokens: 5 } } }),
+    ].join("\n");
+    const parsed = parseClaudeStreamJson(stdout);
+    expect(parsed.contextTokens).toBe(43_020);
+    expect(parsed.usage?.cachedInputTokens).toBe(90_000);
+  });
+});

@@ -1263,6 +1263,49 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(finished.usageJson).toMatchObject({ rawInputTokens: 1, rawCachedInputTokens: 2, rawInputIncludesCached: false });
   });
 
+  it.each([
+    { label: "default ceiling, above", heartbeatConfig: {}, sessionContextTokens: 230_000, rotate: true },
+    { label: "default ceiling, below", heartbeatConfig: {}, sessionContextTokens: 199_999, rotate: false },
+    { label: "no context measure", heartbeatConfig: {}, sessionContextTokens: undefined, rotate: false },
+    { label: "raised ceiling", heartbeatConfig: { sessionCompaction: { maxSessionContextTokens: 300_000 } }, sessionContextTokens: 230_000, rotate: false },
+    { label: "disabled ceiling", heartbeatConfig: { sessionCompaction: { maxSessionContextTokens: 0 } }, sessionContextTokens: 900_000, rotate: false },
+  ])("rotates a claude_local session on its context size ($label)", async ({ heartbeatConfig, sessionContextTokens, rotate }) => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ heartbeatConfig });
+    const sessionId = randomUUID();
+    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, agentId));
+    await db.insert(agentRuntimeState).values({ companyId, agentId, adapterType: "claude_local", sessionId });
+    // Per-run sums far above the ceiling must not rotate by themselves.
+    await db.insert(heartbeatRuns).values({ companyId, agentId, status: "succeeded", sessionIdAfter: sessionId,
+      usageJson: { inputTokens: 90_000, cachedInputTokens: 2_500_000, outputTokens: 10, rawInputTokens: 90_000,
+        rawCachedInputTokens: 2_500_000, rawInputIncludesCached: false,
+        ...(sessionContextTokens === undefined ? {} : { sessionContextTokens }) },
+      resultJson: { summary: "Continue from this completed turn" }, startedAt: new Date(), finishedAt: new Date(),
+    });
+    mockAdapterExecute.mockResolvedValueOnce({ exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+      provider: "test", model: "test-model", costUsd: 0, usageComplete: true, usageBasis: "per_run",
+      usage: { inputTokens: 1, cachedInputTokens: 2, outputTokens: 3 }, sessionContextTokens: 42_000,
+    });
+    const run = await heartbeat.wakeup(agentId, { source: "on_demand", triggerDetail: "manual" });
+    expect(run).not.toBeNull();
+    expect(await waitForCondition(() => Promise.resolve(countExecuteCallsForRun(run!.id) === 1))).toBe(true);
+    const [context] = mockAdapterExecute.mock.calls.find(([context]) => context?.runId === run!.id)!;
+    if (rotate) {
+      // No resume: the adapter starts a fresh provider session with the handoff.
+      expect(context.runtime.sessionId).toBeNull();
+      expect(context.runtime.sessionParams).toBeNull();
+      expect(context.context.paperclipSessionRotationReason).toBe("session context reached 230,000 tokens (threshold 200,000)");
+      expect(context.context.paperclipSessionHandoffMarkdown).toContain("Continue from this completed turn");
+      expect(context.context.paperclipPreviousSessionId).toBe(sessionId);
+    } else {
+      expect(context.runtime.sessionId).toBe(sessionId);
+      expect(context.context.paperclipSessionRotationReason).toBeUndefined();
+      expect(context.context.paperclipSessionHandoffMarkdown).toBeUndefined();
+    }
+    await heartbeat.drainActiveRunExecutions();
+    const [finished] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+    expect(finished.usageJson).toMatchObject({ sessionContextTokens: 42_000, sessionRotated: rotate });
+  });
+
   it("skips wakes before queueing when per-agent daily cost cap is reached", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent({
       heartbeatConfig: {
