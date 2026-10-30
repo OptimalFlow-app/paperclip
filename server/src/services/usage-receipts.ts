@@ -34,6 +34,9 @@ const envelopeSchema = z.object({
   schema: z.literal("paperclip/accounting-receipt/v1"), id: z.string().uuid(), companyId: z.string().uuid(),
   runId: z.string().uuid(), sourceId: z.string().uuid(), sequence: z.number().int().positive(), receivedAt: z.iso.datetime(),
   adapterType: z.string().max(100), receipt: checkpointSchema,
+  // Emitted by the recorder's complete(): the adapter's last word for this
+  // source. An incomplete final receipt can be settled; no later one will come.
+  final: z.boolean().optional(),
 });
 export type UsageReceiptEnvelope = z.infer<typeof envelopeSchema>;
 export const usageReceiptSpoolPath = () => path.join(resolvePaperclipInstanceRoot(), "accounting-receipts");
@@ -84,7 +87,7 @@ export async function persistUsageReceipt(db: Db, raw: UsageReceiptEnvelope) {
         costUsd: receipt.costUsd ?? null, costUsdExact: receipt.costUsdExact ?? null, cacheAdjustedCostUsd: receipt.cacheAdjustedCostUsd ?? null,
         usageByModel: receipt.usageByModel ?? null, usageSource: receipt.usageBasis ?? "per_run", providerRequestId: receipt.providerRequestId ?? null,
         accountingReceiptReady: previous.accountingCaptureFailed !== true && receipt.complete && receipt.usageBasis !== "session_cumulative", accountingReceiptId: envelope.id,
-        accountingReceiptSequence: envelope.sequence, accountingReceiptReceivedAt: envelope.receivedAt,
+        accountingReceiptSequence: envelope.sequence, accountingReceiptReceivedAt: envelope.receivedAt, accountingReceiptFinal: envelope.final === true,
         costStatus: receipt.costStatus ?? null,
         pricingProvenance: receipt.pricingProvenance ?? { source: receipt.costUsd != null || receipt.costUsdExact != null ? "provider_reported" : "unknown", version: "accounting-receipt/v1" },
       },
@@ -198,7 +201,7 @@ export async function createRunUsageRecorder(db: Db, input: { companyId: string;
   try { await probe.sync(); } finally { await probe.close(); await fs.rm(path.join(directory, `${sourceId}.probe`)); }
   await syncDirectory(directory);
   await recoverPendingRunUsageReceipts(db, input, directory);
-  const bound = await db.update(heartbeatRuns).set({ usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || ${JSON.stringify({ accountingReceiptSourceId: sourceId, accountingReceiptSequence: 0, accountingReceiptReady: false })}::jsonb` })
+  const bound = await db.update(heartbeatRuns).set({ usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || ${JSON.stringify({ accountingReceiptSourceId: sourceId, accountingReceiptSequence: 0, accountingReceiptReady: false, accountingReceiptFinal: false })}::jsonb` })
     .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId), isNull(heartbeatRuns.costAccountedAt))).returning({ id: heartbeatRuns.id, runtimeMode: heartbeatRuns.runtimeMode, usageJson: heartbeatRuns.usageJson });
   if (bound.length !== 1) throw conflict("Run cannot accept a new usage recorder");
   let sequence = 0;
@@ -238,7 +241,7 @@ export async function createRunUsageRecorder(db: Db, input: { companyId: string;
     chain = result.then(() => undefined, () => undefined);
     return result;
   }
-  async function capture(raw: AdapterUsageCheckpoint) {
+  async function capture(raw: AdapterUsageCheckpoint, final = false) {
     const parsed = checkpointSchema.parse(raw) as AdapterUsageCheckpoint;
     const attempt = parsed.attemptId ?? currentAttempt;
     if (!attempts.has(attempt)) currentAttempt = attempt;
@@ -286,7 +289,7 @@ export async function createRunUsageRecorder(db: Db, input: { companyId: string;
       // can be considered complete, even if a later attempt succeeded.
       receipt.complete = !captureFailed && parts.every(part => part.complete);
     }
-    const envelope: UsageReceiptEnvelope = { schema: "paperclip/accounting-receipt/v1", id: randomUUID(), ...input, sourceId, sequence: ++sequence, receivedAt: new Date().toISOString(), receipt };
+    const envelope: UsageReceiptEnvelope = { schema: "paperclip/accounting-receipt/v1", id: randomUUID(), ...input, sourceId, sequence: ++sequence, receivedAt: new Date().toISOString(), receipt, ...(final ? { final } : {}) };
     const file = await spoolUsageReceipt(envelope, directory);
     try { await persistUsageReceipt(db, envelope); await fs.rm(file, { force: true }); }
     catch (error) { logger.warn({ err: error, runId: input.runId, receiptId: envelope.id }, "Usage receipt is durable on disk; database replay pending"); }
@@ -309,9 +312,9 @@ export async function createRunUsageRecorder(db: Db, input: { companyId: string;
         const finalPrice = final.cacheAdjustedCostUsd ?? final.costUsdExact ?? final.costUsd;
         const previousPrice = previous.cacheAdjustedCostUsd ?? previous.costUsdExact ?? previous.costUsd;
         const moreCost = finalPrice != null && (previousPrice == null || usdToUnits(finalPrice) > usdToUnits(previousPrice));
-        if (!moreTokens && !moreCost) return capture(previous);
+        if (!moreTokens && !moreCost) return capture(previous, true);
       }
-      return capture(final);
+      return capture(final, true);
     }),
   };
 }

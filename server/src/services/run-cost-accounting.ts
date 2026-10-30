@@ -14,6 +14,33 @@ const object = (value: unknown): Record<string, unknown> => value && typeof valu
 const text = (value: unknown) => typeof value === "string" && value.length > 0 ? value : null;
 const amount = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 
+/** A terminal non-subscription run whose receipt stays incomplete this long
+ * after its last evidence (finish or latest receipt) is settled as if its final
+ * receipt had arrived. Covers runs finalized before the final marker existed
+ * and server crashes between the stop and the adapter's closing receipt. */
+export const INCOMPLETE_RECEIPT_GRACE_MS = 60 * 60 * 1000;
+
+/** SQL twin of `incompleteReceiptSettleable`, for the sweep and health views.
+ * Never null: missing markers mean "not settleable", so `not (...)` holds. */
+export const incompleteReceiptSettleableSql = (now = new Date()) => sql`coalesce(${heartbeatRuns.usageJson}->>'accountingCaptureFailed' is distinct from 'true'
+  and (${heartbeatRuns.usageJson}->>'billingType' = 'subscription_included'
+  or ${heartbeatRuns.usageJson}->>'accountingReceiptFinal' = 'true'
+  or greatest(coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.updatedAt}), (${heartbeatRuns.usageJson}->>'accountingReceiptReceivedAt')::timestamptz)
+    < ${new Date(now.getTime() - INCOMPLETE_RECEIPT_GRACE_MS).toISOString()}::timestamptz), false)`;
+
+/** Whether a terminal run with an incomplete receipt can be settled with what
+ * was observed: never after a failed capture; at once for subscription billing
+ * (free by definition, settled at zero); otherwise once the adapter's final
+ * receipt arrived or the grace period passed (settled as unpriced). */
+function incompleteReceiptSettleable(run: typeof heartbeatRuns.$inferSelect, now = new Date()) {
+  const usage = object(run.usageJson);
+  if (usage.accountingCaptureFailed === true) return false;
+  if (usage.billingType === "subscription_included" || usage.accountingReceiptFinal === true) return true;
+  const receivedAt = text(usage.accountingReceiptReceivedAt);
+  const lastEvidence = Math.max((run.finishedAt ?? run.updatedAt).getTime(), receivedAt ? Date.parse(receivedAt) || 0 : 0);
+  return lastEvidence < now.getTime() - INCOMPLETE_RECEIPT_GRACE_MS;
+}
+
 /** The run's persisted usage is a durable receipt. Ledger, runtime totals, and
  * acknowledgement commit together, including after a restart or failed run. */
 export async function accountRunCost(db: Db, runId: string, hooks: BudgetServiceHooks = {}, receiptIndex?: UsageReceiptIndex) {
@@ -62,12 +89,13 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
     }
     // A stop can mark the run terminal before the provider's shutdown receipt
     // arrives. Keep the debt pending instead of acknowledging an invented zero
-    // and permanently discarding that late receipt. Subscription billing is
-    // free by definition: a run killed before its receipt (timeout) cannot
-    // hide billable spend, so it settles at zero with the tokens observed.
-    const receiptMissing = !preProviderFailure && object(run.usageJson).accountingReceiptReady === false;
-    const subscriptionWithoutReceipt = receiptMissing && object(run.usageJson).billingType === "subscription_included";
-    if (receiptMissing && !subscriptionWithoutReceipt) return false;
+    // and permanently discarding that late receipt. Settle what was observed
+    // once nothing more can change the bill: subscription billing is free by
+    // definition (a run killed at its timeout cannot hide billable spend), and
+    // otherwise the adapter's final receipt or the grace period says no later
+    // receipt will come.
+    const incompleteReceipt = !preProviderFailure && object(run.usageJson).accountingReceiptReady === false;
+    if (incompleteReceipt && !incompleteReceiptSettleable(run)) return false;
     // Acknowledgement is part of the same transaction. Budget checks inside
     // this transaction must not mistake this receipt for missing accounting.
     await tx.update(heartbeatRuns).set({ costAccountingPending: false, costAccountedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
@@ -101,7 +129,10 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
       providerRequestId: text(usage.providerRequestId),
       pricingProvenance: object(usage.pricingProvenance),
       model: text(usage.model) ?? "unknown", billingType,
-      costStatus: (costUsd === null || usage.costStatus === "unpriced") && billingType !== "subscription_included" && hasBillableEvidence ? "unpriced" : usage.costStatus === "estimated" || subscriptionWithoutReceipt ? "estimated" : "reported",
+      // An incomplete receipt's cost is a lower bound: unpriced (budget policy
+      // applies, adjustable later) unless the subscription makes it free.
+      costStatus: (costUsd === null || usage.costStatus === "unpriced" || incompleteReceipt) && billingType !== "subscription_included" && hasBillableEvidence ? "unpriced"
+        : usage.costStatus === "estimated" || (incompleteReceipt && billingType === "subscription_included") ? "estimated" : "reported",
       inputTokens: amount(usage.inputTokens) ?? 0, cachedInputTokens: amount(usage.cachedInputTokens) ?? 0, outputTokens: amount(usage.outputTokens) ?? 0,
       costCents, occurredAt: run.finishedAt ?? run.createdAt,
     };
@@ -168,7 +199,7 @@ export async function reconcileRunCosts(db: Db, hooks: BudgetServiceHooks = {}) 
       and ${heartbeatRuns.runtimeMode} = 'native' and ${nativeRunFinalizations.resultId} is null
       and ${nativeRunFinalizations.phase} <> 'terminal_failure'))`,
     sql`(${heartbeatRuns.usageJson}->>'accountingReceiptReady' is distinct from 'false' or ${heartbeatRuns.resultJson}->'executionRecovery'->>'providerWorkStarted' = 'false' or ${heartbeatRuns.usageJson}->>'accountingProviderWorkStarted' = 'false'
-      or ${heartbeatRuns.usageJson}->>'billingType' = 'subscription_included')`,
+      or ${incompleteReceiptSettleableSql()})`,
   )).orderBy(asc(heartbeatRuns.updatedAt), asc(heartbeatRuns.id)).limit(100);
   let accounted = 0;
   const receiptIndex = pending.length > 0 ? await indexPendingUsageReceipts() : undefined;
