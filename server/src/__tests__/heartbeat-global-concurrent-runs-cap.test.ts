@@ -131,7 +131,7 @@ describeEmbeddedPostgres("heartbeat instance-wide concurrent-run cap", () => {
       name,
       role: "engineer",
       status: "idle",
-      adapterType: "codex_local",
+      adapterType: "process",
       adapterConfig: {},
       runtimeConfig: {
         heartbeat: {
