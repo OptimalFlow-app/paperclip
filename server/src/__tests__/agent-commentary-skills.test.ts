@@ -43,6 +43,11 @@ describe("default feedback skill delivery", () => {
         expect(await readFile(join(skills, name, "SKILL.md"), "utf8")).toContain("scripts/submit-agent-commentary.mjs");
       }
       expect(await readFile(join(skills, "paperclip", "scripts", "submit-agent-commentary.mjs"), "utf8")).toContain("process.stdin");
+      // The slim core points to on-demand references; every one must be materialized with it.
+      const core = await readFile(join(skills, "paperclip", "SKILL.md"), "utf8");
+      const refs = [...new Set(core.match(/references\/[\w.-]+\.md/g))];
+      expect(refs).toEqual(expect.arrayContaining(["references/heartbeat-details.md", "references/interactions.md"]));
+      for (const ref of refs) expect(await readFile(join(skills, "paperclip", ref), "utf8")).not.toBe("");
     }
     // Runtime policy removes entries before default selection; never resurrect them.
     const restricted = entries.filter(e => e.key === keys[0]);
