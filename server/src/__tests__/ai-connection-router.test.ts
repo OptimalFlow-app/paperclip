@@ -283,7 +283,7 @@ describe("durable, authorized connection routing", () => {
     const [agent] = await db.insert(agents).values({ companyId, name: "Run-key fixture", adapterType: "claude_local", adapterConfig: { cwd: home, engine: "cli" }, runtimeConfig: { aiConnection: { mode: "router", connectionId: pool.id }, heartbeat: { enabled: false } } }).returning();
     let affinity: string | undefined;
     const execute = vi.fn(); registerServerAdapter({ ...getServerAdapter("claude_local"), execute });
-    const heartbeat = heartbeatService(db, { pluginWorkerManager: worker, runtimeEnv: {} });
+    const heartbeat = heartbeatService(db, { pluginWorkerManager: worker, runtimeEnv: { PAPERCLIP_MAX_CONCURRENT_RUNS: process.env.PAPERCLIP_MAX_CONCURRENT_RUNS } });
     proposal.mockImplementationOnce(async (_id, _method, request) => {
       const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agent!.id), eq(heartbeatRuns.status, "running")));
       expect(run?.contextSnapshot?.aiRouterTaskKey).toBe(run?.id);
@@ -315,7 +315,7 @@ describe("durable, authorized connection routing", () => {
     const execute = vi.fn(); registerServerAdapter({ ...getServerAdapter("claude_local"), execute });
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ five_hour: { utilization: 100 } })));
     proposal.mockResolvedValueOnce({ kind: "exhausted", retryAt: new Date(Date.now() + 60_000).toISOString(), skipped: { [members[1]!.id]: "Exhausted" } });
-    const heartbeat = heartbeatService(db, { pluginWorkerManager: worker, runtimeEnv: {} });
+    const heartbeat = heartbeatService(db, { pluginWorkerManager: worker, runtimeEnv: { PAPERCLIP_MAX_CONCURRENT_RUNS: process.env.PAPERCLIP_MAX_CONCURRENT_RUNS } });
     try {
       const run = await heartbeat.wakeup(agent!.id, { source: "assignment", reason: "issue_assigned", payload: { issueId: issue!.id }, contextSnapshot: { issueId: issue!.id, wakeReason: "issue_assigned", responsibleUserId: "alice" }, triggerDetail: "system" });
       expect(run).not.toBeNull();

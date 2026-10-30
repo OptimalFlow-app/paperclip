@@ -14,6 +14,7 @@ export type InstanceSettingsWriteDb = Pick<
 import {
   DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
   DEFAULT_BACKUP_RETENTION,
+  DEFAULT_INSTANCE_MAX_CONCURRENT_RUNS,
   PAPERCLIP_CLOUD_MANAGED_BY,
   instanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
@@ -208,13 +209,42 @@ function normalizeGeneralSettings(raw: unknown): InstanceGeneralSettings {
       backupRetention: parsed.data.backupRetention ?? DEFAULT_BACKUP_RETENTION,
       // Absent => unrestricted; only carry through an explicit policy.
       ...(parsed.data.executionMode ? { executionMode: parsed.data.executionMode } : {}),
+      maxConcurrentRuns: parsed.data.maxConcurrentRuns ?? DEFAULT_INSTANCE_MAX_CONCURRENT_RUNS,
     };
   }
   return {
     censorUsernameInLogs: false,
     feedbackDataSharingPreference: DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
     backupRetention: DEFAULT_BACKUP_RETENTION,
+    maxConcurrentRuns: DEFAULT_INSTANCE_MAX_CONCURRENT_RUNS,
   };
+}
+
+export const MAX_CONCURRENT_RUNS_ENV_KEY = "PAPERCLIP_MAX_CONCURRENT_RUNS";
+
+function parseMaxConcurrentRunsOverride(value: string | undefined): number | null {
+  const trimmed = value?.trim();
+  if (!trimmed || !/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : null;
+}
+
+/**
+ * The effective instance-wide cap on `running` heartbeat runs.
+ * `PAPERCLIP_MAX_CONCURRENT_RUNS` (a positive integer) wins over the stored
+ * general setting, so an operator can tighten the cap when the UI/API is not
+ * reachable. An unset or invalid variable falls back to the setting.
+ */
+export function resolveEffectiveMaxConcurrentRuns(
+  general: Pick<InstanceGeneralSettings, "maxConcurrentRuns"> | null | undefined,
+  runtimeEnv: Record<string, string | undefined> = process.env,
+): number {
+  const override = parseMaxConcurrentRunsOverride(runtimeEnv[MAX_CONCURRENT_RUNS_ENV_KEY]);
+  if (override !== null) return override;
+  const stored = general?.maxConcurrentRuns;
+  return typeof stored === "number" && Number.isInteger(stored) && stored >= 1
+    ? stored
+    : DEFAULT_INSTANCE_MAX_CONCURRENT_RUNS;
 }
 
 export function normalizeExperimentalSettings(raw: unknown): InstanceExperimentalSettings {

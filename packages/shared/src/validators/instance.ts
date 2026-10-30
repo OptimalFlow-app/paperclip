@@ -5,6 +5,7 @@ import {
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
   DEFAULT_BACKUP_RETENTION,
+  DEFAULT_INSTANCE_MAX_CONCURRENT_RUNS,
 } from "../types/instance.js";
 import { feedbackDataSharingPreferenceSchema } from "./feedback.js";
 import { shapeWithoutDefaults } from "./partial.js";
@@ -31,6 +32,10 @@ export const instanceGeneralSettingsSchema = z.object({
   // Execution policy. Absent/"any" = unrestricted; "kubernetes" forces the
   // Kubernetes sandbox provider and denies local/ssh execution (cloud_tenant).
   executionMode: z.enum(["kubernetes", "any"]).optional(),
+  // Instance-wide cap on heartbeat runs in `running` at the same time, across
+  // every agent and company. Runs over the cap stay `queued`.
+  // PAPERCLIP_MAX_CONCURRENT_RUNS overrides it at read time.
+  maxConcurrentRuns: z.number().int().min(1).default(DEFAULT_INSTANCE_MAX_CONCURRENT_RUNS),
 }).strict();
 
 export const patchInstanceGeneralSettingsSchema = z

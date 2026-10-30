@@ -1382,6 +1382,14 @@ Per-agent schedule fields in `adapter_config`:
 - `intervalSec` integer (minimum 30)
 - `maxConcurrentRuns` integer; new agents default to `20`; scheduler clamps configured values to `1..50`
 
+Instance-wide cap: `instance_settings.general.maxConcurrentRuns` (integer ≥ 1,
+default `3`; `PAPERCLIP_MAX_CONCURRENT_RUNS` overrides it) bounds the number of
+runs in `running` across every agent and company. The check and the
+`queued → running` transition are serialized across agents. A run over the cap
+stays `queued` (never cancelled); when a slot frees up it goes to the agent
+whose queued run is oldest (`createdAt`), and each agent keeps its own priority
+order for its runs.
+
 Scheduler must skip invocation when:
 
 - agent is paused/terminated
