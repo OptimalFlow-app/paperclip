@@ -541,6 +541,30 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
     expect(await commentWake(agentId, issueId, { type: "user", id: "board-user" })).not.toBeNull();
   });
 
+  it("never holds an event-carrying agent-originated wake for cooldownSec", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentIssue({ cooldownSec: 300 });
+    const peerAgentId = await seedPeerAgent(companyId);
+    await seedTerminalRun({ companyId, agentId, issueId, finishedSecondsAgo: 30 });
+
+    // An agent comment inside the window is held back.
+    expect(await commentWake(agentId, issueId, { type: "agent", id: peerAgentId })).toBeNull();
+    expect((await latestWakeRequest(agentId))?.reason).toBe("issue_agent_wake_cooldown");
+
+    // A reviewer sending the work back inside the same window carries an
+    // event: dropping it would leave the issue in_progress with nobody on it.
+    const changesRequestedWake = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "execution_changes_requested",
+      payload: { issueId },
+      contextSnapshot: { issueId, wakeReason: "execution_changes_requested" },
+      requestedByActorType: "agent",
+      requestedByActorId: peerAgentId,
+    });
+    expect(changesRequestedWake).not.toBeNull();
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+  });
+
   it("admits agent-originated wakes once cooldownSec has elapsed", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentIssue({ cooldownSec: 20 });
     const peerAgentId = await seedPeerAgent(companyId);

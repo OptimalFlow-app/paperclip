@@ -203,15 +203,21 @@ export function evaluateIssueRewakeThrottle(input: IssueRewakeThrottleInput): Is
 /**
  * `runtimeConfig.heartbeat.cooldownSec`: minimum spacing between two runs of
  * the same agent on the same issue when the wake comes from another agent.
+ * It only applies to wakes already in the throttle class
+ * (`isThrottleCandidateIssueRewake` is true: agent comments and event-free
+ * state wakes). A held wake is dropped, not replayed, so event-carrying wakes
+ * (changes requested, blockers resolved, interaction answers, …) always pass.
  * Human-originated wakes (comments, interaction answers, board assignments),
  * system wakes and the agent's own wakes are never held back by it.
  */
 export function isAgentWakeCooldownCandidate(input: {
   agentId: string;
   cooldownSec: number;
+  isThrottleCandidate: boolean;
   requestedByActorType?: "user" | "agent" | "system" | null;
   requestedByActorId?: string | null;
 }): boolean {
+  if (!input.isThrottleCandidate) return false;
   if (!(input.cooldownSec > 0)) return false;
   if (input.requestedByActorType !== "agent") return false;
   return input.requestedByActorId !== input.agentId;

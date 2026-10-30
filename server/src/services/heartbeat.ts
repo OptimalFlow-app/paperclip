@@ -28656,16 +28656,15 @@ export function heartbeatService(
           // so external pollers/reconcilers can't storm full-price sessions.
           // Server-side recovery retries insert runs directly and never reach
           // this gate.
-          if (
-            isThrottleCandidateIssueRewake({
-              reason,
-              wakeCommentId: wakeCommentId ?? null,
-              requestedByActorType: opts.requestedByActorType ?? null,
-              forceFreshSession:
-                enrichedContextSnapshot.forceFreshSession === true,
-              hasExplicitResume: Boolean(explicitResumeSession),
-            })
-          ) {
+          const isRewakeThrottleCandidate = isThrottleCandidateIssueRewake({
+            reason,
+            wakeCommentId: wakeCommentId ?? null,
+            requestedByActorType: opts.requestedByActorType ?? null,
+            forceFreshSession:
+              enrichedContextSnapshot.forceFreshSession === true,
+            hasExplicitResume: Boolean(explicitResumeSession),
+          });
+          if (isRewakeThrottleCandidate) {
             const throttleNow = new Date();
             const recentTerminalRuns = await tx
               .select({
@@ -28789,12 +28788,15 @@ export function heartbeatService(
           }
 
           // runtimeConfig.heartbeat.cooldownSec spaces out runs of
-          // this agent on this issue when another agent triggers them. Human
-          // and system wakes never reach this gate's blocking branch.
+          // this agent on this issue when another agent triggers them. It only
+          // covers the throttle class above: a held wake is dropped, so
+          // event-carrying wakes always pass. Human and system wakes never
+          // reach this gate's blocking branch.
           if (
             isAgentWakeCooldownCandidate({
               agentId,
               cooldownSec: policy.cooldownSec,
+              isThrottleCandidate: isRewakeThrottleCandidate,
               requestedByActorType: opts.requestedByActorType ?? null,
               requestedByActorId: opts.requestedByActorId ?? null,
             })

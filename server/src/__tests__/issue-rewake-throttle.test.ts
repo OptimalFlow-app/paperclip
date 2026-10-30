@@ -237,9 +237,16 @@ describe("countsAsIssueProgressActivity", () => {
 describe("agent wake cooldown", () => {
   const agentId = "agent-b";
 
-  it("only applies to wakes requested by another agent with a positive cooldown", () => {
-    const base = { agentId, cooldownSec: 60, requestedByActorType: "agent" as const, requestedByActorId: "agent-a" };
+  it("only applies to throttle-class wakes requested by another agent with a positive cooldown", () => {
+    const base = {
+      agentId,
+      cooldownSec: 60,
+      isThrottleCandidate: true,
+      requestedByActorType: "agent" as const,
+      requestedByActorId: "agent-a",
+    };
     expect(isAgentWakeCooldownCandidate(base)).toBe(true);
+    expect(isAgentWakeCooldownCandidate({ ...base, isThrottleCandidate: false })).toBe(false);
     expect(isAgentWakeCooldownCandidate({ ...base, requestedByActorType: "user", requestedByActorId: "board" })).toBe(false);
     expect(isAgentWakeCooldownCandidate({ ...base, requestedByActorType: "system" })).toBe(false);
     expect(isAgentWakeCooldownCandidate({ ...base, requestedByActorType: null })).toBe(false);
