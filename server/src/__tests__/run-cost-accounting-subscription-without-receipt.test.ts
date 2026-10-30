@@ -68,7 +68,7 @@ describe("terminal runs without a usage receipt", () => {
     expect(await agent()).toMatchObject({ status: "idle", pauseReason: null });
   });
 
-  it("keeps a metered run without its receipt pending (no invented zero)", async () => {
+  it("keeps a metered run without its final receipt pending (no invented zero), then settles its final incomplete receipt as unpriced", async () => {
     const runId = await timedOutRun("metered_api", { costUsd: 0.4 });
 
     expect(await accountRunCost(db, runId)).toBe(false);
@@ -78,6 +78,16 @@ describe("terminal runs without a usage receipt", () => {
     expect(await healthState(runId)).toBe("waiting_for_receipt");
     expect(await status()).toBe("hard_stop");
     expect(await agent()).toMatchObject({ status: "paused", pauseReason: "budget" });
+
+    // The adapter's final receipt says nothing more will come: settle what
+    // was observed, unpriced (a lower bound), never as an invented zero.
+    const finalRunId = await timedOutRun("metered_api", { costUsd: 0.4, accountingReceiptFinal: true });
+    expect(await healthState(finalRunId)).toBe("retryable");
+    expect(await reconcileRunCosts(db)).toMatchObject({ scanned: 1, accounted: 1 });
+    expect(await run(finalRunId)).toMatchObject({ costAccountingPending: false, costAccountedAt: expect.any(Date) });
+    expect(await events(finalRunId)).toEqual([expect.objectContaining({
+      costCents: 40, costStatus: "unpriced", billingType: "metered_api", inputTokens: 120, outputTokens: 30 })]);
+    expect(await run(runId)).toMatchObject({ costAccountingPending: true, costAccountedAt: null });
   });
 
   it("keeps a subscription run whose usage capture failed pending", async () => {

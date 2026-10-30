@@ -5,7 +5,7 @@ import { conflict, notFound } from "../errors.js";
 import { receiptFingerprint } from "./receipt-fingerprint.js";
 import { withAccountingReadSnapshot, withAccountingTransaction } from "./accounting-transaction.js";
 import { logActivity } from "./activity-log.js";
-import { accountRunCost } from "./run-cost-accounting.js";
+import { accountRunCost, incompleteReceiptSettleableSql } from "./run-cost-accounting.js";
 import type { BudgetServiceHooks } from "./budgets.js";
 
 /** Independent aggregation: deliberately does not reuse writer projections. */
@@ -108,8 +108,8 @@ export function accountingIntegrityService(db: Db, hooks: BudgetServiceHooks = {
       const pending = await tx.execute<{ runId: string; agentId: string; state: "waiting_for_receipt" | "retryable"; lastError: string | null; attempts: number; since: string; lastAttemptAt: string | null }>(sql`
         select id as "runId", agent_id as "agentId", case when usage_json->>'accountingReceiptReady' = 'false'
           and usage_json->>'accountingProviderWorkStarted' is distinct from 'false'
-          and (usage_json->>'billingType' is distinct from 'subscription_included' or usage_json->>'accountingCaptureFailed' = 'true')
-          and result_json->'executionRecovery'->>'providerWorkStarted' is distinct from 'false' then 'waiting_for_receipt' else 'retryable' end as state,
+          and result_json->'executionRecovery'->>'providerWorkStarted' is distinct from 'false'
+          and not ${incompleteReceiptSettleableSql()} then 'waiting_for_receipt' else 'retryable' end as state,
         accounting_last_error as "lastError", accounting_attempt_count as attempts, coalesce(finished_at,created_at)::text as since, accounting_last_attempt_at::text as "lastAttemptAt"
         from heartbeat_runs where company_id = ${companyId} and cost_accounting_pending and status in ('succeeded','failed','timed_out','cancelled','interrupted') order by coalesce(finished_at,created_at),id limit 100`);
       const unpriced = await tx.execute<{ runId: string | null; costEventId: string; agentId: string; since: string }>(sql`
