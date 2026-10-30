@@ -3795,6 +3795,8 @@ interface WakeupOptions {
   };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;
+  /** Internal promotion of a debounced comment wake; never set by route callers. */
+  bypassCommentDebounce?: boolean;
 }
 
 type UsageTotals = {
@@ -7321,6 +7323,71 @@ function isInteractionResolutionWakePayload(
   payload: Record<string, unknown> | null | undefined,
 ) {
   return readNonEmptyString(payload?.mutation) === "interaction";
+}
+
+export const COMMENT_DEBOUNCE_STATUS = "debounced_comment";
+const COMMENT_DEBOUNCE_PAYLOAD_KEY = "_paperclipCommentDebounce";
+const COMMENT_DEBOUNCE_DEFAULT_SEC = 120;
+const COMMENT_DEBOUNCE_DEFAULT_MAX_SEC = 300;
+const COMMENT_DEBOUNCE_TICK_BATCH = 100;
+const COMMENT_DEBOUNCE_ISSUE_PATH = sql.raw(`'{${COMMENT_DEBOUNCE_PAYLOAD_KEY},issueId}'`);
+const COMMENT_DEBOUNCE_DUE_PATH = sql.raw(`'{${COMMENT_DEBOUNCE_PAYLOAD_KEY},dueAt}'`);
+
+/**
+ * `runtimeConfig.heartbeat.commentDebounceSec` delays a plain comment wake so
+ * that comments posted close together reach the agent as one run. 0 disables
+ * it. `commentDebounceMaxSec` caps the sliding window from its first comment.
+ */
+export function parseCommentDebouncePolicy(heartbeat: Record<string, unknown>) {
+  const commentDebounceSec = Math.max(
+    0,
+    Math.floor(asNumber(heartbeat.commentDebounceSec, COMMENT_DEBOUNCE_DEFAULT_SEC)),
+  );
+  const commentDebounceMaxSec = Math.max(
+    commentDebounceSec,
+    Math.floor(asNumber(heartbeat.commentDebounceMaxSec, COMMENT_DEBOUNCE_DEFAULT_MAX_SEC)),
+  );
+  return { commentDebounceSec, commentDebounceMaxSec };
+}
+
+/**
+ * Only a plain comment from the issue thread is debounced. Interaction
+ * answers, resume/interrupt requests, review-path recovery and every internal
+ * delivery path keep their immediate wake.
+ */
+function isDebounceableCommentWake(opts: WakeupOptions, executionWaitRequestId?: string) {
+  const payload = opts.payload ?? {};
+  const context = opts.contextSnapshot ?? {};
+  return (
+    opts.reason === "issue_commented" &&
+    !opts.bypassCommentDebounce &&
+    !executionWaitRequestId &&
+    readNonEmptyString(payload.mutation) === "comment" &&
+    readNonEmptyString(context.source) === "issue.comment" &&
+    Boolean(readNonEmptyString(payload.commentId) ?? readNonEmptyString(context.wakeCommentId)) &&
+    !opts.durableChatRequest &&
+    !opts.manualUserWake &&
+    !opts.failedRunId &&
+    !opts.queuedCommentRequestId &&
+    !opts.queuedCommentInterruptId &&
+    !opts.issueStateGuard &&
+    !opts.idempotencyKey &&
+    payload.resumeIntent !== true &&
+    context.resumeIntent !== true &&
+    !readNonEmptyString(payload.interruptedRunId) &&
+    !readNonEmptyString(context.interruptedRunId) &&
+    payload.reviewPathLost !== true &&
+    !isInteractionResolutionWakePayload(payload) &&
+    !hasInteractionContinuationWakeContext(context)
+  );
+}
+
+function readWakeIssueId(opts: WakeupOptions) {
+  return (
+    readNonEmptyString(opts.contextSnapshot?.issueId) ??
+    readNonEmptyString(opts.payload?.issueId) ??
+    readNonEmptyString(opts.payload?.taskId)
+  );
 }
 
 function clearInteractionContinuationWakeContext(
@@ -16889,6 +16956,7 @@ export function heartbeatService(
           heartbeat.dailySpendCentsLimit ??
           heartbeat.dailyBudgetCents,
       ),
+      ...parseCommentDebouncePolicy(heartbeat),
     };
   }
 
@@ -27054,6 +27122,250 @@ export function heartbeatService(
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string) {
+    if (isDebounceableCommentWake(opts, executionWaitRequestId)) {
+      if (await debounceCommentWake(agentId, opts)) return null;
+    }
+    const run = await enqueueWakeupNow(agentId, opts, executionWaitRequestId);
+    const issueId = readWakeIssueId(opts);
+    if (!opts.bypassCommentDebounce && issueId && isUuidLike(issueId)) {
+      // The immediate wake keeps its place; held comments follow it through the
+      // normal queue (coalesced into its run or deferred behind it).
+      await flushDebouncedCommentWakes(agentId, issueId).catch((err) =>
+        logger.warn({ err, agentId, issueId }, "failed to flush debounced comment wakes"),
+      );
+    }
+    return run;
+  }
+
+  /**
+   * Hold a plain comment wake for `commentDebounceSec` when the agent is not
+   * already working on the issue. Later comments on the same issue extend one
+   * persisted request (sliding window, capped by `commentDebounceMaxSec`), so a
+   * restart keeps the held wake; `tickTimers` promotes it once due.
+   * Returns false when the wake must go through the normal path.
+   */
+  async function debounceCommentWake(agentId: string, opts: WakeupOptions) {
+    const issueId = readWakeIssueId(opts);
+    if (!issueId || !isUuidLike(issueId)) return false;
+    const agent = await getAgent(agentId);
+    if (!agent) return false;
+    const { commentDebounceSec, commentDebounceMaxSec } = parseHeartbeatPolicy(agent);
+    if (commentDebounceSec <= 0) return false;
+
+    const issue = await db
+      .select({ id: issues.id, executionRunId: issues.executionRunId })
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (!issue || issue.executionRunId) return false;
+    if (isConversation(await getIssueExecutionContext(agent.companyId, issueId))) return false;
+    const activeRun = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, agent.companyId),
+        eq(heartbeatRuns.agentId, agentId),
+        inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (activeRun) return false;
+
+    const commentId =
+      readNonEmptyString(opts.payload?.commentId) ??
+      readNonEmptyString(opts.contextSnapshot?.wakeCommentId);
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`);
+      const existing = await tx
+        .select()
+        .from(agentWakeupRequests)
+        .where(and(
+          eq(agentWakeupRequests.companyId, agent.companyId),
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+          sql`${agentWakeupRequests.payload} #>> ${COMMENT_DEBOUNCE_ISSUE_PATH} = ${issueId}`,
+        ))
+        .orderBy(asc(agentWakeupRequests.requestedAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      const previous = parseObject(existing?.payload?.[COMMENT_DEBOUNCE_PAYLOAD_KEY]);
+      const windowStartedAtMs = Date.parse(String(previous.windowStartedAt ?? "")) || now.getTime();
+      const dueAt = new Date(Math.min(
+        now.getTime() + commentDebounceSec * 1000,
+        windowStartedAtMs + commentDebounceMaxSec * 1000,
+      ));
+      const debounce = {
+        issueId,
+        windowStartedAt: new Date(windowStartedAtMs).toISOString(),
+        dueAt: dueAt.toISOString(),
+        commentIds: mergeWakeCommentIds(previous.commentIds, commentId),
+        contextSnapshot: { ...(opts.contextSnapshot ?? {}) },
+      };
+      const payload = { ...(opts.payload ?? {}), [COMMENT_DEBOUNCE_PAYLOAD_KEY]: debounce };
+      if (!existing) {
+        await tx.insert(agentWakeupRequests).values({
+          companyId: agent.companyId,
+          agentId,
+          source: opts.source ?? "automation",
+          triggerDetail: opts.triggerDetail ?? null,
+          reason: "issue_commented",
+          payload,
+          status: COMMENT_DEBOUNCE_STATUS,
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+        });
+        return;
+      }
+      // A human comment keeps ownership of the batch over a later agent comment.
+      const keepRequester =
+        existing.requestedByActorType === "user" && opts.requestedByActorType !== "user";
+      await tx
+        .update(agentWakeupRequests)
+        .set({
+          payload,
+          coalescedCount: existing.coalescedCount + 1,
+          ...(keepRequester
+            ? {}
+            : {
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+              }),
+          updatedAt: now,
+        })
+        .where(and(
+          eq(agentWakeupRequests.id, existing.id),
+          eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+        ));
+    });
+    return true;
+  }
+
+  async function promoteDebouncedCommentWake(requestId: string) {
+    const now = new Date();
+    // Claim before dispatch so overlapping ticks or flushes promote once.
+    const claimed = await db
+      .update(agentWakeupRequests)
+      .set({ status: "coalesced", claimedAt: now, finishedAt: now, updatedAt: now })
+      .where(and(
+        eq(agentWakeupRequests.id, requestId),
+        eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+      ))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!claimed) return null;
+    const { [COMMENT_DEBOUNCE_PAYLOAD_KEY]: rawDebounce, ...payload } = claimed.payload ?? {};
+    const debounce = parseObject(rawDebounce);
+    const issueId = readNonEmptyString(debounce.issueId);
+    const issue = issueId
+      ? await db
+          .select({ assigneeAgentId: issues.assigneeAgentId })
+          .from(issues)
+          .where(and(eq(issues.id, issueId), eq(issues.companyId, claimed.companyId)))
+          .then((rows) => rows[0] ?? null)
+      : null;
+    const heldCommentIds = mergeWakeCommentIds(debounce.commentIds);
+    const liveCommentIds = issueId && heldCommentIds.length > 0
+      ? new Set(await db
+          .select({ id: issueComments.id })
+          .from(issueComments)
+          .where(and(
+            eq(issueComments.companyId, claimed.companyId),
+            eq(issueComments.issueId, issueId),
+            inArray(issueComments.id, heldCommentIds),
+            isNull(issueComments.deletedAt),
+          ))
+          .then((rows) => rows.map((row) => row.id)))
+      : new Set<string>();
+    const commentIds = heldCommentIds.filter((id) => liveCommentIds.has(id));
+    const cancelReason = !issue || issue.assigneeAgentId !== claimed.agentId
+      // The new assignee receives its own assignment wake with the thread.
+      ? "Issue was reassigned or removed during the comment debounce window"
+      : commentIds.length === 0
+        ? "Every held comment was deleted during the comment debounce window"
+        : null;
+    if (cancelReason) {
+      await db
+        .update(agentWakeupRequests)
+        .set({ status: "cancelled", error: cancelReason, updatedAt: new Date() })
+        .where(eq(agentWakeupRequests.id, claimed.id));
+      return null;
+    }
+    const latestCommentId = commentIds[commentIds.length - 1]!;
+    try {
+      const run = await enqueueWakeup(claimed.agentId, {
+        source: claimed.source as WakeupOptions["source"],
+        triggerDetail: (claimed.triggerDetail ?? undefined) as WakeupOptions["triggerDetail"],
+        reason: claimed.reason,
+        payload: { ...payload, commentId: latestCommentId },
+        requestedByActorType: (claimed.requestedByActorType ?? undefined) as WakeupOptions["requestedByActorType"],
+        requestedByActorId: claimed.requestedByActorId,
+        contextSnapshot: {
+          ...parseObject(debounce.contextSnapshot),
+          commentId: latestCommentId,
+          wakeCommentId: latestCommentId,
+          [WAKE_COMMENT_IDS_KEY]: commentIds,
+        },
+        bypassCommentDebounce: true,
+      });
+      if (run) {
+        await db
+          .update(agentWakeupRequests)
+          .set({ runId: run.id, updatedAt: new Date() })
+          .where(eq(agentWakeupRequests.id, claimed.id));
+      }
+      return run;
+    } catch (err) {
+      // Put the batch back so the next tick retries it.
+      await db
+        .update(agentWakeupRequests)
+        .set({
+          status: COMMENT_DEBOUNCE_STATUS,
+          claimedAt: null,
+          finishedAt: null,
+          error: err instanceof Error ? err.message : String(err),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(agentWakeupRequests.id, claimed.id), eq(agentWakeupRequests.status, "coalesced")));
+      throw err;
+    }
+  }
+
+  async function flushDebouncedCommentWakes(agentId: string, issueId: string) {
+    const pending = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.agentId, agentId),
+        eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+        sql`${agentWakeupRequests.payload} #>> ${COMMENT_DEBOUNCE_ISSUE_PATH} = ${issueId}`,
+      ));
+    for (const row of pending) await promoteDebouncedCommentWake(row.id);
+  }
+
+  async function tickDueCommentDebounces(now = new Date()) {
+    const due = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+        sql`(${agentWakeupRequests.payload} #>> ${COMMENT_DEBOUNCE_DUE_PATH})::timestamptz <= ${now.toISOString()}::timestamptz`,
+      ))
+      .orderBy(asc(agentWakeupRequests.requestedAt))
+      .limit(COMMENT_DEBOUNCE_TICK_BATCH);
+    let promoted = 0;
+    for (const row of due) {
+      try {
+        if (await promoteDebouncedCommentWake(row.id)) promoted += 1;
+      } catch (err) {
+        logger.warn({ err, wakeupRequestId: row.id }, "failed to promote debounced comment wake");
+      }
+    }
+    return { checked: due.length, promoted };
+  }
+
+  async function enqueueWakeupNow(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -30634,10 +30946,11 @@ export function heartbeatService(
       }
 
       const issueMonitors = await tickDueIssueMonitors(now);
+      const commentDebounces = await tickDueCommentDebounces(now);
 
       return {
-        checked: checked + issueMonitors.checked,
-        enqueued: enqueued + issueMonitors.triggered,
+        checked: checked + issueMonitors.checked + commentDebounces.checked,
+        enqueued: enqueued + issueMonitors.triggered + commentDebounces.promoted,
         skipped: skipped + issueMonitors.skipped,
       };
     },
