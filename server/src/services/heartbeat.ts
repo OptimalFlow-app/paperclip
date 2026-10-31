@@ -19892,7 +19892,7 @@ export function heartbeatService(
     cancel: (wake, reason) => cancelBatchedWake(db, wake.id, reason),
     claim: (wakes) => claimBatchedWakes(db, wakes.map((wake) => wake.id)),
     release: (wakes) => releaseClaimedBatchedWakes(db, wakes),
-    complete: (wakes, runId) => completeClaimedBatchedWakes(db, wakes.map((wake) => wake.id), runId),
+    complete: (wakes, runId) => completeClaimedBatchedWakes(db, wakes, runId),
     deliverSingle: async (wake) => {
       const run = await enqueueWakeup(wake.agentId, {
         source: wake.source as WakeupOptions["source"],

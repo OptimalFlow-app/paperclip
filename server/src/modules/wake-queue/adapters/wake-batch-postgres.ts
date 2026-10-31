@@ -290,13 +290,30 @@ export async function releaseClaimedBatchedWakes(db: Db, wakes: BatchedWake[]) {
   }
 }
 
-/** Records the run that delivered claimed wakes; a wake no run picked up is marked skipped. */
-export async function completeClaimedBatchedWakes(db: Db, wakeIds: string[], runId: string | null) {
-  if (wakeIds.length === 0) return;
-  await db
-    .update(agentWakeupRequests)
-    .set(runId
-      ? { runId, updatedAt: new Date() }
-      : { status: "skipped", error: "batch_delivery_not_started", updatedAt: new Date() })
-    .where(inArray(agentWakeupRequests.id, wakeIds));
+/**
+ * Records the run that delivered claimed wakes; a wake no run picked up is
+ * marked skipped. A batch run consumes its wakes directly, so each one gets
+ * its idempotency key back and still blocks a duplicate delivery. A replayed
+ * single wake leaves the key on the replay's own request.
+ */
+export async function completeClaimedBatchedWakes(db: Db, wakes: BatchedWake[], runId: string | null) {
+  if (wakes.length === 0) return;
+  if (!runId) {
+    await db
+      .update(agentWakeupRequests)
+      .set({ status: "skipped", error: "batch_delivery_not_started", updatedAt: new Date() })
+      .where(inArray(agentWakeupRequests.id, wakes.map((wake) => wake.id)));
+    return;
+  }
+  const restoreKeys = wakes.length > 1;
+  for (const wake of wakes) {
+    await db
+      .update(agentWakeupRequests)
+      .set({
+        runId,
+        ...(restoreKeys ? { idempotencyKey: wake.meta.idempotencyKey } : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(agentWakeupRequests.id, wake.id));
+  }
 }

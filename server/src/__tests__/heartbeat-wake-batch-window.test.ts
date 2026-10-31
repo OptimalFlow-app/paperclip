@@ -329,6 +329,9 @@ describeEmbeddedPostgres("heartbeat wake batch window", () => {
       [interactionIssue.id, "issue_commented"],
     ]);
     expect(batched[2]).toMatchObject({ interactionId, wakeCommentIds: [comment!.id] });
+    // The batch run consumed the interaction wake; it keeps its idempotency key.
+    const interactionRow = (await wakeRows(agentId)).find((row) => row.idempotencyKey === `interaction:${interactionId}`);
+    expect(interactionRow).toMatchObject({ status: "coalesced", runId: runs[0]!.id });
 
     await waitForStarted(1);
     const prompt = renderPaperclipWakePrompt(adapterGate.started[0]!.context.paperclipWake);
