@@ -375,6 +375,9 @@ export function decideQueuedCommentActorOwnsEntry(facts: QueuedCommentActorOwner
 /** A batch run lists at most this many issues; the rest wait for the next flush. */
 export const WAKE_BATCH_MAX_ISSUES_PER_RUN = 10;
 
+/** Wake reason of the one run that delivers a flushed batch of two or more wakes. */
+export const WAKE_BATCH_REASON = "wake_batch";
+
 export type BatchAdmissionFacts = {
   /** The agent's `heartbeat.batchWindowSec`; 0 or missing disables batching. */
   batchWindowSec: number;
