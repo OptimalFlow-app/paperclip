@@ -365,6 +365,121 @@ export function decideQueuedCommentActorOwnsEntry(facts: QueuedCommentActorOwner
   return facts.authorUserId === facts.actorId;
 }
 
+// Pure decision rules for the per-agent wake batch window
+// (`runtimeConfig.heartbeat.batchWindowSec`): whether a new on-demand issue
+// wake waits in the agent's batch instead of starting its own run
+// (decideBatchAdmission), whether an agent's pending batch is due
+// (decideBatchFlush), and whether one batched wake is still worth delivering
+// when the batch is flushed (decideBatchedWakeRevalidation).
+
+/** A batch run lists at most this many issues; the rest wait for the next flush. */
+export const WAKE_BATCH_MAX_ISSUES_PER_RUN = 10;
+
+export type BatchAdmissionFacts = {
+  /** The agent's `heartbeat.batchWindowSec`; 0 or missing disables batching. */
+  batchWindowSec: number;
+  source: string;
+  /** True when the wake names an issue. */
+  hasIssue: boolean;
+  /** True when a live execution run still holds the issue; the per-issue coalesce/defer path owns that wake. */
+  activeExecutionRunPresent: boolean;
+  requestedByActorType: string | null;
+  issuePriority: string | null;
+  /**
+   * True when the wake carries a contract a batch run cannot honor: a
+   * durable chat receipt, an execution wait, a failed-run retry, an explicit
+   * continuation, a conversation, a recovery lineage, a manual board wake, or
+   * a readmission of a batch that is being flushed.
+   */
+  requiresDedicatedRun: boolean;
+};
+
+export type BatchAdmissionDecision =
+  | { kind: "batch" }
+  | {
+      kind: "immediate";
+      reason:
+        | "window_disabled"
+        | "timer"
+        | "no_issue"
+        | "active_execution_run"
+        | "user_actor"
+        | "critical_issue"
+        | "dedicated_run";
+    };
+
+/**
+ * Decides whether a new wake waits in the agent's batch or follows the
+ * ordinary path at once. Check order is fixed: the window check runs first,
+ * so a disabled window never reaches any other rule.
+ */
+export function decideBatchAdmission(facts: BatchAdmissionFacts): BatchAdmissionDecision {
+  if (!(facts.batchWindowSec > 0)) return { kind: "immediate", reason: "window_disabled" };
+  if (facts.source === "timer") return { kind: "immediate", reason: "timer" };
+  if (!facts.hasIssue) return { kind: "immediate", reason: "no_issue" };
+  if (facts.activeExecutionRunPresent) return { kind: "immediate", reason: "active_execution_run" };
+  if (facts.requestedByActorType === "user") return { kind: "immediate", reason: "user_actor" };
+  if (facts.issuePriority === "critical") return { kind: "immediate", reason: "critical_issue" };
+  if (facts.requiresDedicatedRun) return { kind: "immediate", reason: "dedicated_run" };
+  return { kind: "batch" };
+}
+
+export type BatchFlushFacts = {
+  /** The agent's current window. 0 flushes at once: a disabled window must not strand a batch. */
+  batchWindowSec: number;
+  oldestRequestedAtMs: number;
+  nowMs: number;
+  /** True when the agent has a queued, running, or scheduled-retry run. */
+  agentHasActiveRun: boolean;
+};
+
+export type BatchFlushDecision =
+  | { kind: "flush" }
+  | { kind: "wait"; reason: "window_open" | "agent_busy" };
+
+/** Decides whether an agent's pending batch is due: its window has elapsed and the agent is idle. */
+export function decideBatchFlush(facts: BatchFlushFacts): BatchFlushDecision {
+  const windowMs = Math.max(0, facts.batchWindowSec) * 1000;
+  if (facts.oldestRequestedAtMs + windowMs > facts.nowMs) return { kind: "wait", reason: "window_open" };
+  if (facts.agentHasActiveRun) return { kind: "wait", reason: "agent_busy" };
+  return { kind: "flush" };
+}
+
+export type BatchedWakeRevalidationFacts = {
+  issueFound: boolean;
+  issueStatus: string | null;
+  assigneeAgentIdAtAdmission: string | null;
+  currentAssigneeAgentId: string | null;
+  /** Count of comment ids the wake was triggered by. */
+  commentIdCount: number;
+  /** Count of those comments that are still present (not deleted). */
+  liveCommentIdCount: number;
+  /** True when the wake has a reason to run beyond its comments (assignment, review, blockers, interaction). */
+  preservesIndependentContinuation: boolean;
+};
+
+export type BatchedWakeCancelReason = "batch_issue_closed" | "batch_reassigned" | "batch_comments_deleted";
+
+export type BatchedWakeRevalidationDecision =
+  | { kind: "deliver" }
+  | { kind: "cancel"; reason: BatchedWakeCancelReason };
+
+/** Decides whether one batched wake is still deliverable when its batch is flushed. */
+export function decideBatchedWakeRevalidation(
+  facts: BatchedWakeRevalidationFacts,
+): BatchedWakeRevalidationDecision {
+  if (!facts.issueFound || facts.issueStatus === "done" || facts.issueStatus === "cancelled") {
+    return { kind: "cancel", reason: "batch_issue_closed" };
+  }
+  if ((facts.assigneeAgentIdAtAdmission ?? null) !== (facts.currentAssigneeAgentId ?? null)) {
+    return { kind: "cancel", reason: "batch_reassigned" };
+  }
+  if (facts.commentIdCount > 0 && facts.liveCommentIdCount === 0 && !facts.preservesIndependentContinuation) {
+    return { kind: "cancel", reason: "batch_comments_deleted" };
+  }
+  return { kind: "deliver" };
+}
+
 /**
  * Decides the release-recovery outcome once the deferred-wake queue is
  * empty and no wake was promoted. The review-participant branch and the
