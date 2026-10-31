@@ -560,7 +560,19 @@ import {
   isResolvedInteractionContinuationWakeContext,
 } from "../modules/run-dispatch/index.js";
 import {
+  admitWakeIntoBatch,
+  cancelBatchedWake,
+  claimBatchedWakes,
+  completeClaimedBatchedWakes,
+  createFlushDueWakeBatches,
   createWakeQueue,
+  decideBatchAdmission,
+  listAgentsWithBatchedWakes,
+  listBatchedWakes,
+  readBatchedWakeFacts,
+  releaseClaimedBatchedWakes,
+  type BatchedWake,
+  WAKE_BATCH_REASON,
   WakeQueueApplicationError,
   type IssueSnapshot as WakeQueueIssueSnapshot,
   type PostCommitEffect as WakeQueuePostCommitEffect,
@@ -3797,6 +3809,8 @@ interface WakeupOptions {
   };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;
+  /** Internal replay of a flushed wake batch; never batched again. */
+  wakeBatchFlush?: boolean;
 }
 
 type UsageTotals = {
@@ -7785,6 +7799,95 @@ export async function attestReviewedExternalChatRun(input: {
   throw new Error("reviewed_chat_execution_binding_not_ready");
 }
 
+// A batch run lists up to WAKE_BATCH_MAX_ISSUES_PER_RUN issues, so its new
+// comments share a larger body budget than one issue's wake.
+const MAX_BATCHED_WAKE_COMMENT_BODY_TOTAL_CHARS = 2 * MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS;
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+/** Builds the per-issue entries of a batch run's wake payload, with each issue's new comments inlined. */
+async function buildBatchedWakeEntries(input: {
+  db: Db;
+  companyId: string;
+  contextSnapshot: Record<string, unknown>;
+  exposeLowTrustRaw?: boolean;
+}) {
+  const raw = input.contextSnapshot.paperclipBatchedWakes;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const entries = raw.map((value) => parseObject(value)).filter((entry) => readNonEmptyString(entry.issueId));
+  const commentIds = [...new Set(entries.flatMap((entry) => readStringArray(entry.wakeCommentIds)))];
+  const commentRows = commentIds.length === 0
+    ? []
+    : await input.db
+        .select({
+          id: issueComments.id,
+          issueId: issueComments.issueId,
+          body: issueComments.body,
+          authorType: issueComments.authorType,
+          authorAgentId: issueComments.authorAgentId,
+          authorUserId: issueComments.authorUserId,
+          presentation: issueComments.presentation,
+          metadata: issueComments.metadata,
+          sourceTrust: issueComments.sourceTrust,
+          createdAt: issueComments.createdAt,
+          deletedAt: issueComments.deletedAt,
+        })
+        .from(issueComments)
+        .where(and(eq(issueComments.companyId, input.companyId), inArray(issueComments.id, commentIds)));
+  const commentsById = new Map(commentRows.map((row) => [row.id, row]));
+  const redaction = createRunSecretRedactionRegistry(input.db);
+  let remainingBodyChars = MAX_BATCHED_WAKE_COMMENT_BODY_TOTAL_CHARS;
+  const result: Array<Record<string, unknown>> = [];
+  for (const entry of entries) {
+    const issueId = String(entry.issueId);
+    const ids = readStringArray(entry.wakeCommentIds);
+    const comments: Array<Record<string, unknown>> = [];
+    let truncated = false;
+    for (const id of ids) {
+      const row = commentsById.get(id);
+      if (!row || row.issueId !== issueId || row.deletedAt) continue;
+      if (comments.length >= MAX_INLINE_WAKE_COMMENTS || remainingBodyChars <= 0) {
+        truncated = true;
+        break;
+      }
+      const safeRow = input.exposeLowTrustRaw ? row : sanitizeQuarantinedCommentForHigherTrust(row);
+      const allowed = Math.min(MAX_INLINE_WAKE_COMMENT_BODY_CHARS, remainingBodyChars);
+      const body = safeRow.body.length > allowed ? safeRow.body.slice(0, allowed) : safeRow.body;
+      const bodyTruncated = body.length < safeRow.body.length;
+      if (bodyTruncated) truncated = true;
+      remainingBodyChars -= body.length;
+      comments.push({
+        id: row.id,
+        issueId: row.issueId,
+        author: {
+          type: row.authorType ?? (row.authorAgentId ? "agent" : row.authorUserId ? "user" : "system"),
+          id: row.authorAgentId ?? row.authorUserId ?? null,
+        },
+        createdAt: row.createdAt.toISOString(),
+        body,
+        bodyTruncated,
+      });
+    }
+    result.push(await redaction.redactForIssue(input.companyId, issueId, {
+      issueId,
+      identifier: readNonEmptyString(entry.identifier),
+      title: readNonEmptyString(entry.title),
+      status: readNonEmptyString(entry.status),
+      priority: readNonEmptyString(entry.priority),
+      reason: readNonEmptyString(entry.reason),
+      reasons: readStringArray(entry.reasons),
+      interactionId: readNonEmptyString(entry.interactionId),
+      requestedByActorType: readNonEmptyString(entry.requestedByActorType),
+      commentIds: ids,
+      comments,
+      truncated,
+    }));
+  }
+  return result;
+}
+
 export async function buildPaperclipWakePayload(input: {
   db: Db;
   companyId: string;
@@ -7845,11 +7948,13 @@ export async function buildPaperclipWakePayload(input: {
           )
           .then((rows) => rows[0] ?? null)
       : null);
+  const batchedWakes = issueId ? [] : await buildBatchedWakeEntries(input);
   if (
     commentIds.length === 0 &&
     Object.keys(executionStage).length === 0 &&
     !issueSummary &&
-    !agentMessageText
+    !agentMessageText &&
+    batchedWakes.length === 0
   )
     return null;
 
@@ -8275,6 +8380,7 @@ export async function buildPaperclipWakePayload(input: {
       : [],
     childIssueSummaryTruncated:
       input.contextSnapshot.childIssueSummaryTruncated === true,
+    ...(batchedWakes.length > 0 ? { batchedWakes } : {}),
     dispositionRepair: input.contextSnapshot.legacyDispositionEpisode ? {
       attempt: input.contextSnapshot.dispositionRepairAttempt,
       maxAttempts: input.contextSnapshot.dispositionRepairMaxAttempts,
@@ -16870,6 +16976,7 @@ export function heartbeatService(
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
+      batchWindowSec: Math.max(0, asNumber(heartbeat.batchWindowSec, 0)),
       maxConcurrentRuns: normalizeMaxConcurrentRuns(
         heartbeat.maxConcurrentRuns,
       ),
@@ -18344,6 +18451,16 @@ export function heartbeatService(
         },
       });
     }
+
+    // A finished run may be what a pending wake batch was waiting for. Fire
+    // and forget like trackWakeup, so a shutdown drain still awaits it.
+    if (runningCount === 0) {
+      const flush = flushDueWakeBatches({ agentId }).catch((err) => {
+        logger.warn({ err, agentId }, "failed to flush wake batch after run");
+      });
+      activeWakeupPromises.add(flush);
+      void flush.finally(() => activeWakeupPromises.delete(flush));
+    }
   }
 
   function mergeRunStopMetadataForAgent(
@@ -19745,6 +19862,90 @@ export function heartbeatService(
     return { reaped: reaped.length, runIds: reaped };
   }
 
+  // Per-agent wake batch window (`runtimeConfig.heartbeat.batchWindowSec`).
+  // Both delivery paths re-enter enqueueWakeup with `wakeBatchFlush`, so a
+  // flushed wake meets every gate a fresh wake meets and is never re-batched.
+  const flushWakeBatches = createFlushDueWakeBatches<BatchedWake>({
+    now: () => new Date(),
+    listPendingAgents: (agentId) => listAgentsWithBatchedWakes(db, agentId),
+    readAgentBatchState: async (agentId) => {
+      const agent = await getAgent(agentId);
+      if (!agent) return { kind: "missing" };
+      if (!(await getAgentInvokability(agent)).invokable) return { kind: "held" };
+      if (await budgets.getInvocationBlock(agent.companyId, agentId, {})) return { kind: "held" };
+      const [active] = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.agentId, agentId),
+          inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+        ))
+        .limit(1);
+      return {
+        kind: "ready",
+        batchWindowSec: parseHeartbeatPolicy(agent).batchWindowSec,
+        agentHasActiveRun: Boolean(active),
+      };
+    },
+    listBatchedWakes: (agentId) => listBatchedWakes(db, agentId),
+    readRevalidationFacts: async (wakes) => (await readBatchedWakeFacts(db, wakes)).facts,
+    cancel: (wake, reason) => cancelBatchedWake(db, wake.id, reason),
+    claim: (wakes) => claimBatchedWakes(db, wakes.map((wake) => wake.id)),
+    release: (wakes) => releaseClaimedBatchedWakes(db, wakes),
+    complete: (wakes, runId) => completeClaimedBatchedWakes(db, wakes, runId),
+    deliverSingle: async (wake) => {
+      const run = await enqueueWakeup(wake.agentId, {
+        source: wake.source as WakeupOptions["source"],
+        triggerDetail: (wake.triggerDetail ?? undefined) as WakeupOptions["triggerDetail"],
+        reason: wake.reason,
+        payload: wake.payload,
+        contextSnapshot: wake.contextSnapshot,
+        requestedByActorType: (wake.requestedByActorType ?? undefined) as WakeupOptions["requestedByActorType"],
+        requestedByActorId: wake.requestedByActorId,
+        idempotencyKey: wake.meta.idempotencyKey,
+        wakeBatchFlush: true,
+      });
+      return { runId: run?.id ?? null };
+    },
+    deliverBatch: async (agentId, wakes) => {
+      const { issuesById } = await readBatchedWakeFacts(db, wakes);
+      const batchedWakes = wakes.map((wake) => {
+        const issue = issuesById.get(wake.issueId);
+        return {
+          wakeupRequestId: wake.id,
+          issueId: wake.issueId,
+          identifier: issue?.identifier ?? null,
+          title: issue?.title ?? null,
+          status: issue?.status ?? null,
+          priority: issue?.priority ?? null,
+          reason: readNonEmptyString(wake.contextSnapshot.wakeReason) ?? wake.reason,
+          reasons: wake.meta.reasons,
+          wakeCommentIds: queuedCommentIdsFromWakePayload(wake.payload),
+          interactionId: readNonEmptyString(wake.contextSnapshot.interactionId),
+          requestedByActorType: wake.requestedByActorType,
+        };
+      });
+      const run = await enqueueWakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: WAKE_BATCH_REASON,
+        payload: { wakeBatchRequestIds: wakes.map((wake) => wake.id) },
+        contextSnapshot: { wakeReason: WAKE_BATCH_REASON, paperclipBatchedWakes: batchedWakes },
+        requestedByActorType: "system",
+        requestedByActorId: "wake-batch",
+        allowRunCoalescing: false,
+        wakeBatchFlush: true,
+      });
+      return { runId: run?.id ?? null };
+    },
+    onError: (agentId, err) => logger.warn({ err, agentId }, "failed to flush wake batch"),
+  });
+
+  async function flushDueWakeBatches(opts: { agentId?: string } = {}) {
+    if ((await getSchedulingSuppression()).suppressed) return [];
+    return flushWakeBatches(opts);
+  }
+
   async function resumeQueuedRuns() {
     if ((await getSchedulingSuppression()).suppressed) return;
     await resumeExecutionWaitComments();
@@ -19838,6 +20039,8 @@ export function heartbeatService(
     for (const agentId of await listAgentIdsWithQueuedRunsOldestFirst(cutoff)) {
       await startNextQueuedRunForAgent(agentId);
     }
+    // The scheduler tick drives due wake batches through the same sweep.
+    await flushWakeBatches();
   }
 
   async function recoverActiveSessionGoals() {
@@ -27938,6 +28141,7 @@ export function heartbeatService(
               conversationState: issues.conversationState,
               status: issues.status,
               statusVersion: issues.statusVersion,
+              priority: issues.priority,
               projectId: issues.projectId,
               projectWorkspaceId: issues.projectWorkspaceId,
               executionWorkspaceId: issues.executionWorkspaceId,
@@ -28943,6 +29147,42 @@ export function heartbeatService(
             enrichedContextSnapshot.explicitUserContinuation = explicitContinuation;
           }
 
+          // Per-agent batch window: an on-demand wake on an idle issue waits in
+          // the agent's batch instead of starting its own run. Off (0) by default.
+          const batchAdmission = decideBatchAdmission({
+            batchWindowSec: opts.wakeBatchFlush ? 0 : policy.batchWindowSec,
+            source,
+            hasIssue: true,
+            activeExecutionRunPresent: Boolean(activeExecutionRun),
+            requestedByActorType: opts.requestedByActorType ?? null,
+            issuePriority: issue.priority,
+            requiresDedicatedRun: Boolean(
+              durableRequest || executionWaitRequestId || opts.failedRunId || opts.manualUserWake ||
+              opts.queuedCommentInterruptId || opts.queuedCommentRequestId || opts.issueStateGuard ||
+              explicitContinuation || explicitResumeSession || reconciledSourceRunId || automaticParentRunId ||
+              isConversation(issue) || enrichedContextSnapshot.forceFreshSession === true ||
+              readNonEmptyString(enrichedContextSnapshot.interruptedRunId),
+            ),
+          });
+          if (batchAdmission.kind === "batch") {
+            await admitWakeIntoBatch(tx as unknown as Db, {
+              companyId: agent.companyId,
+              agentId,
+              issueId: issue.id,
+              assigneeAgentId: issue.assigneeAgentId,
+              source,
+              triggerDetail,
+              reason,
+              payload,
+              contextSnapshot: enrichedContextSnapshot,
+              wakeCommentId: wakeCommentId ?? null,
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+            });
+            return { kind: "batched" as const };
+          }
+
           const wakeupRequest = await tx
             .insert(agentWakeupRequests)
             .values({
@@ -29114,7 +29354,7 @@ export function heartbeatService(
       if (outcome.kind === "durable") {
         return outcome.receipt.runId ? getRun(outcome.receipt.runId) : null;
       }
-      if (outcome.kind === "deferred" || outcome.kind === "skipped") {
+      if (outcome.kind === "deferred" || outcome.kind === "skipped" || outcome.kind === "batched") {
         return null;
       }
       if (outcome.kind === "coalesced") {
@@ -30625,6 +30865,7 @@ export function heartbeatService(
     retryScheduledRetryNow,
 
     resumeQueuedRuns,
+    flushDueWakeBatches,
 
     scheduleBoundedRetry: async (
       runId: string,

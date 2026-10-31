@@ -2069,6 +2069,18 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                   className={inputClass}
                 />
               </Field>
+              <Field label="Wake batch window (sec)" hint={help.batchWindowSec}>
+                <DraftNumberInput
+                  value={eff(
+                    "heartbeat",
+                    "batchWindowSec",
+                    Number(heartbeat.batchWindowSec ?? 0),
+                  )}
+                  onCommit={(v) => mark("heartbeat", "batchWindowSec", v)}
+                  immediate
+                  className={inputClass}
+                />
+              </Field>
               <div className="rounded-md border border-border/70 px-3 py-2">
                 <ToggleField
                   label="Continue after max-turn stop"
