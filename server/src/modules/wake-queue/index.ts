@@ -56,6 +56,21 @@ export type {
   QueuedCommentQueueSnapshot,
 } from "./application/queued-comment-ports.js";
 export type { QueuedCommentQueuePostgresAdapterDeps } from "./adapters/queued-comment-postgres.js";
+export { decideBatchAdmission, WAKE_BATCH_MAX_ISSUES_PER_RUN, WAKE_BATCH_REASON } from "./domain/policy.js";
+export { createFlushDueWakeBatches, selectBatchShare } from "./application/wake-batch.js";
+export type { AgentBatchState, WakeBatchFlushPorts, WakeBatchFlushResult } from "./application/wake-batch.js";
+export {
+  admitWakeIntoBatch,
+  cancelBatchedWake,
+  claimBatchedWakes,
+  completeClaimedBatchedWakes,
+  listAgentsWithBatchedWakes,
+  listBatchedWakes,
+  readBatchedWakeFacts,
+  releaseClaimedBatchedWakes,
+  WAKE_BATCH_STATUS,
+} from "./adapters/wake-batch-postgres.js";
+export type { BatchedWake } from "./adapters/wake-batch-postgres.js";
 
 export type WakeQueueDeps = {
   /** Stays in `heartbeat.ts`; resolves the responsible user for a promoted or recovery run seed. */
