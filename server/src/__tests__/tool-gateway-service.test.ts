@@ -42,12 +42,16 @@ import { toolAccessService } from "../services/tool-access.js";
 import {
   createToolGatewayService,
   ToolGatewayHttpError,
+  toolGatewayFixturesEnabledFromEnv,
 } from "../services/tool-gateway.js";
 import { canonicalToolArguments, signToolArguments } from "../services/tool-content-guards.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+
+// The demo MCP fixtures (mcp-remote-fixture, mcp-stdio-fixture) are hidden unless this flag is set.
+process.env.PAPERCLIP_TOOL_GATEWAY_FIXTURES = "1";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -202,6 +206,61 @@ describeEmbeddedPostgres("tool gateway service", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("reads the fixture flag from PAPERCLIP_TOOL_GATEWAY_FIXTURES, off by default", () => {
+    expect(toolGatewayFixturesEnabledFromEnv({})).toBe(false);
+    expect(toolGatewayFixturesEnabledFromEnv({ PAPERCLIP_TOOL_GATEWAY_FIXTURES: "" })).toBe(false);
+    expect(toolGatewayFixturesEnabledFromEnv({ PAPERCLIP_TOOL_GATEWAY_FIXTURES: "0" })).toBe(false);
+    expect(toolGatewayFixturesEnabledFromEnv({ PAPERCLIP_TOOL_GATEWAY_FIXTURES: "1" })).toBe(true);
+    expect(toolGatewayFixturesEnabledFromEnv({ PAPERCLIP_TOOL_GATEWAY_FIXTURES: "true" })).toBe(true);
+  });
+
+  it("hides and refuses the demo MCP fixtures when the fixture flag is absent", async () => {
+    vi.stubEnv("PAPERCLIP_TOOL_GATEWAY_FIXTURES", "");
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Allow read tools",
+      policyType: "allow",
+      selectors: { riskLevel: "read" },
+    });
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession({
+      companyId: company.id,
+      agentId: agent.id,
+      runId: run.id,
+    });
+
+    const toolNames = (await gateway.listToolsForSession(session.token)).map((tool) => tool.name);
+    const isFixture = (name: string) => /^mcp-(remote|stdio)-fixture:/.test(name);
+    expect(toolNames.filter(isFixture)).toEqual([]);
+    // The paperclip_self tools described as "read fixture" are real tools and stay listed.
+    expect(toolNames).toEqual(expect.arrayContaining([
+      "paperclip-self:list_my_issues",
+      "paperclip-self:get_issue_context",
+    ]));
+
+    for (const tool of ["mcp-remote-fixture:echo", "mcp-stdio-fixture:increment_counter"]) {
+      await expect(gateway.executeTool({
+        sessionToken: session.token,
+        tool,
+        parameters: tool.endsWith(":echo") ? { message: "hi" } : {},
+      })).rejects.toMatchObject({ status: 404, reasonCode: "tool_not_found" });
+    }
+    expect(await db.select().from(toolInvocations)).toHaveLength(0);
+
+    vi.unstubAllEnvs();
+    const enabledToolNames = (await createTestToolGatewayService(db).listToolsForSession(session.token))
+      .map((tool) => tool.name);
+    // Only the fixtures differ: every other tool stays listed without the flag.
+    expect(enabledToolNames.filter((name) => !isFixture(name))).toEqual(toolNames);
+    expect(enabledToolNames).toEqual(expect.arrayContaining([
+      "mcp-remote-fixture:echo",
+      "mcp-remote-fixture:add",
+      "mcp-stdio-fixture:increment_counter",
+      "mcp-stdio-fixture:runtime_status",
+    ]));
   });
 
   it("gates write tools with an action request and executes only stored reviewed arguments once", async () => {

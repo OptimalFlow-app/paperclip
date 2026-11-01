@@ -64,6 +64,9 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
+// The demo MCP fixtures (mcp-remote-fixture, mcp-stdio-fixture) are hidden unless this flag is set.
+process.env.PAPERCLIP_TOOL_GATEWAY_FIXTURES = "1";
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const testToolActionSigningSecret = "test-tool-action-signing-secret";

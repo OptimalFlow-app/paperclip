@@ -90,6 +90,9 @@ import * as sentry from "../sentry.js";
 import type { VercelConnectClient } from "../services/vercel-connect.js";
 import { invalidatePaperclipCloudConnectorCapabilities, type PaperclipCloudConnector } from "../services/paperclip-cloud-connector.js";
 
+// The demo MCP fixtures (mcp-remote-fixture, mcp-stdio-fixture) are hidden unless this flag is set.
+process.env.PAPERCLIP_TOOL_GATEWAY_FIXTURES = "1";
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported
   ? describe

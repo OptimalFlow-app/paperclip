@@ -6,6 +6,8 @@ Do not print raw bearer tokens, gateway session tokens, credential headers, envi
 
 Tool action approvals require `PAPERCLIP_TOOL_ACTION_SIGNING_SECRET` to be set independently from auth/JWT secrets. `paperclipai onboard` generates it for local instances, and worktree setup propagates or generates an independent value in the worktree `.env`; operator-managed deployments must set it explicitly. Rotate it deliberately: changing it invalidates outstanding signed tool-action approvals, so drain or reject pending approvals before rotation.
 
+The gateway ships demo MCP tools for tests (`mcp-remote-fixture:*` and `mcp-stdio-fixture:*`). They are not connections and are hidden by default: they are neither listed to agents nor callable (a call returns `tool_not_found`). Set `PAPERCLIP_TOOL_GATEWAY_FIXTURES=1` (or `true`) on the server to expose them, for example in tests or local demos.
+
 ## Support Matrix
 
 | Transport | Local trusted | Hosted cloud / public authenticated | Notes |
