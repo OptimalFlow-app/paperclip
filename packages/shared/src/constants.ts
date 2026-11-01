@@ -909,6 +909,8 @@ export const WAKEUP_REQUEST_STATUSES = [
   "deferred_issue_execution",
   // Waiting in the agent's wake batch window (`heartbeat.batchWindowSec`).
   "batched",
+  // Held by the comment debounce (`heartbeat.commentDebounceSec`).
+  "debounced_comment",
   "claimed",
   "coalesced",
   "skipped",
