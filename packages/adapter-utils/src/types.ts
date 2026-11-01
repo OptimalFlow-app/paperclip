@@ -127,6 +127,12 @@ export interface AdapterExecutionResult {
    */
   usageBasis?: "per_run" | "session_cumulative" | null;
   /**
+   * Provider context size at the end of the run: the prompt tokens (fresh,
+   * cache read and cache write) of its last main-loop model call. Unlike
+   * `usage`, this is not summed over calls; it is what a resume re-sends.
+   */
+  sessionContextTokens?: number | null;
+  /**
    * Legacy single session id output. Prefer `sessionParams` + `sessionDisplayId`.
    */
   sessionId?: string | null;

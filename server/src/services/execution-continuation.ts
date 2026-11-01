@@ -140,6 +140,21 @@ export async function currentContinuationOrigins(
   ];
 }
 
+/** Default number of latest comments carried into a continuation envelope. */
+export const DEFAULT_CONTINUATION_HISTORY_COMMENTS = 15;
+
+/**
+ * Read `runtimeConfig.heartbeat.continuationHistory.maxComments`. 0 keeps the
+ * full thread; an absent or invalid value uses the default.
+ */
+export function resolveContinuationHistoryLimit(runtimeConfig: unknown): number {
+  const raw = object(object(object(runtimeConfig).heartbeat).continuationHistory).maxComments;
+  const value = typeof raw === "string" && raw.trim() ? Number(raw) : raw;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : DEFAULT_CONTINUATION_HISTORY_COMMENTS;
+}
+
 /** Re-read task scope at dispatch, including messages already delivered to an earlier provider session. */
 export async function buildExecutionContinuation(input: {
   db: Db;
@@ -152,6 +167,12 @@ export async function buildExecutionContinuation(input: {
   runId?: string;
   summary: string | null;
   exposeLowTrustRaw: boolean;
+  /**
+   * Keep only this many latest comments, plus wake origins, the latest user
+   * request and comments since the agent's previous run on this task. The
+   * continuation summary covers the rest. 0 keeps every comment.
+   */
+  maxHistoryComments?: number;
 }): Promise<ExecutionContinuationEnvelope> {
   const { db, companyId, issueId } = input;
   const [issue] = await db
@@ -283,11 +304,47 @@ export async function buildExecutionContinuation(input: {
   const deliveredMessages = Array.isArray(priorEnvelope.messages)
     ? priorEnvelope.messages.map(object)
     : null;
+  const latestRequest = messages.findLast(
+    (row) =>
+      row.authorType === "user" && !row.createdByRunId && !row.deleted && row.body.trim().length > 0,
+  );
+  const hashObjectiveSource = (value: string) => createHash("sha256").update(value.trim()).digest("hex");
+  const objectiveSource = latestRequest
+    ? { kind: "comment" as const, id: latestRequest.id, revision: latestRequest.updatedAt }
+    : issue.description !== null && issue.description !== undefined
+      ? { kind: "description" as const, id: issue.id, revision: hashObjectiveSource(issue.description) }
+      : { kind: "title" as const, id: issue.id, revision: hashObjectiveSource(issue.title) };
+  const priorRuns = await db
+    .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, createdAt: heartbeatRuns.createdAt, startedAt: heartbeatRuns.startedAt,
+      result: heartbeatRuns.resultJson, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, runtimeMode: heartbeatRuns.runtimeMode, retryOfRunId: heartbeatRuns.retryOfRunId })
+    .from(heartbeatRuns)
+    .where(
+      and(
+        eq(heartbeatRuns.companyId, companyId),
+        or(eq(heartbeatRuns.agentId, input.agentId),
+          sourceRunId ? eq(heartbeatRuns.id, sourceRunId) : undefined),
+        sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+      ),
+    )
+    .orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id));
+  // Bound the thread for every session, fresh or resumed. Direction that
+  // triggered or followed the agent's previous turn is never dropped.
+  const historyLimit = input.maxHistoryComments ?? DEFAULT_CONTINUATION_HISTORY_COMMENTS;
+  const previousAgentRun = priorRuns.findLast(run => run.agentId === input.agentId && run.id !== input.runId);
+  const previousAgentRunStart = previousAgentRun ? (previousAgentRun.startedAt ?? previousAgentRun.createdAt).toISOString() : null;
+  const keptMessages = historyLimit > 0 && messages.length > historyLimit
+    ? messages.filter((message, index) =>
+        index >= messages.length - historyLimit ||
+        originCommentIds.includes(message.id) ||
+        message.id === latestRequest?.id ||
+        (previousAgentRunStart !== null && message.createdAt >= previousAgentRunStart))
+    : messages;
+  const omittedComments = messages.filter(message => !keptMessages.includes(message));
   const resumeDelta =
     deliveredMessages && input.previousContextRunId
       ? {
           baseRunId: input.previousContextRunId,
-          messages: messages.filter(
+          messages: keptMessages.filter(
             (message) =>
               originCommentIds.includes(message.id) ||
               !deliveredMessages.some(
@@ -304,28 +361,6 @@ export async function buildExecutionContinuation(input: {
           ),
         }
       : undefined;
-  const latestRequest = messages.findLast(
-    (row) =>
-      row.authorType === "user" && !row.createdByRunId && !row.deleted && row.body.trim().length > 0,
-  );
-  const hashObjectiveSource = (value: string) => createHash("sha256").update(value.trim()).digest("hex");
-  const objectiveSource = latestRequest
-    ? { kind: "comment" as const, id: latestRequest.id, revision: latestRequest.updatedAt }
-    : issue.description !== null && issue.description !== undefined
-      ? { kind: "description" as const, id: issue.id, revision: hashObjectiveSource(issue.description) }
-      : { kind: "title" as const, id: issue.id, revision: hashObjectiveSource(issue.title) };
-  const priorRuns = await db
-    .select({ id: heartbeatRuns.id, result: heartbeatRuns.resultJson, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, runtimeMode: heartbeatRuns.runtimeMode, retryOfRunId: heartbeatRuns.retryOfRunId })
-    .from(heartbeatRuns)
-    .where(
-      and(
-        eq(heartbeatRuns.companyId, companyId),
-        or(eq(heartbeatRuns.agentId, input.agentId),
-          sourceRunId ? eq(heartbeatRuns.id, sourceRunId) : undefined),
-        sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
-      ),
-    )
-    .orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id));
   const completedActions = priorRuns.flatMap((run) =>
     Object.entries(object(object(run.result).apiToolReceipts)).flatMap(
       ([receiptId, receipt]) => {
@@ -440,7 +475,7 @@ export async function buildExecutionContinuation(input: {
     originCommentIds,
     objective: latestRequest?.body ?? issue.description ?? issue.title,
     objectiveSource,
-    messages,
+    messages: keptMessages,
     humanResponses: interactions.flatMap(row => {
       const response = projectHumanInteractionResponse(row);
       return response ? [response] : [];
@@ -463,10 +498,18 @@ export async function buildExecutionContinuation(input: {
     unresolvedInteractionIds: interactions
       .filter((row) => row.status === "pending")
       .map((row) => row.id),
-    coverage: {
-      kind: "full_task_history",
-      throughCommentId: messages.at(-1)?.id ?? null,
-      summaryThroughCommentId: null,
-    },
+    coverage: omittedComments.length
+      ? {
+          kind: "bounded_task_history",
+          throughCommentId: messages.at(-1)?.id ?? null,
+          summaryThroughCommentId: null,
+          omittedCommentCount: omittedComments.length,
+          omittedThroughCommentId: omittedComments.at(-1)!.id,
+        }
+      : {
+          kind: "full_task_history",
+          throughCommentId: messages.at(-1)?.id ?? null,
+          summaryThroughCommentId: null,
+        },
   };
 }

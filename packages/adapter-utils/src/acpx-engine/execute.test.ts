@@ -1570,6 +1570,44 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(result.billingType).toBe("unknown");
   });
 
+  it("reports the last usage_update context size as sessionContextTokens", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => ({
+        ensureSession: async () => ({
+          backendSessionId: "backend-session",
+          agentSessionId: "agent-session",
+          runtimeSessionName: "runtime-session",
+        }),
+        startTurn: () => ({
+          events: (async function* () {
+            yield { type: "status", text: "usage updated: 47603/200000", tag: "usage_update", used: 47_603, size: 200_000 };
+            yield { type: "status", text: "usage updated: 231000/1000000", tag: "usage_update", used: 231_000, size: 1_000_000,
+              breakdown: { inputTokens: 40, outputTokens: 700, cachedReadTokens: 60 } };
+            yield { type: "done", stopReason: "end_turn" };
+          })(),
+          result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+          cancel: async () => {},
+        }),
+        close: async () => {},
+      }) as never,
+    });
+
+    const result = await execute({
+      runId: "run-session-context-tokens",
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir },
+      context: {},
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as never);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.sessionContextTokens).toBe(231_000);
+  });
+
   it.each(["failed", "cancelled"] as const)("keeps %s in-stream usage provisional without a final receipt", async (status) => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");

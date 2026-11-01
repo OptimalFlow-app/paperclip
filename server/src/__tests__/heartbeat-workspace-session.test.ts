@@ -3120,12 +3120,14 @@ describe("parseSessionCompactionPolicy", () => {
       enabled: true,
       maxSessionRuns: 0,
       maxRawInputTokens: 0,
+      maxSessionContextTokens: 200_000,
       maxSessionAgeHours: 0,
     });
     expect(parseSessionCompactionPolicy(buildAgent("claude_local"))).toEqual({
       enabled: true,
       maxSessionRuns: 0,
       maxRawInputTokens: 0,
+      maxSessionContextTokens: 200_000,
       maxSessionAgeHours: 0,
     });
   });
@@ -3135,12 +3137,14 @@ describe("parseSessionCompactionPolicy", () => {
       enabled: true,
       maxSessionRuns: 200,
       maxRawInputTokens: 2_000_000,
+      maxSessionContextTokens: 200_000,
       maxSessionAgeHours: 72,
     });
     expect(parseSessionCompactionPolicy(buildAgent("opencode_local"))).toEqual({
       enabled: true,
       maxSessionRuns: 200,
       maxRawInputTokens: 2_000_000,
+      maxSessionContextTokens: 200_000,
       maxSessionAgeHours: 72,
     });
   });
@@ -3161,8 +3165,18 @@ describe("parseSessionCompactionPolicy", () => {
       enabled: true,
       maxSessionRuns: 25,
       maxRawInputTokens: 500_000,
+      maxSessionContextTokens: 200_000,
       maxSessionAgeHours: 0,
     });
+  });
+
+  it("lets an agent tune or disable the session context ceiling", () => {
+    const withContextCeiling = (maxSessionContextTokens: unknown) => parseSessionCompactionPolicy(
+      buildAgent("claude_local", { heartbeat: { sessionCompaction: { maxSessionContextTokens } } }),
+    ).maxSessionContextTokens;
+    expect(withContextCeiling(350_000)).toBe(350_000);
+    expect(withContextCeiling("120000")).toBe(120_000);
+    expect(withContextCeiling(0)).toBe(0);
   });
 });
 

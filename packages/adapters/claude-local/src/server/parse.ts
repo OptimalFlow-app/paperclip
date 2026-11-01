@@ -79,6 +79,9 @@ export function createClaudeStreamParser() {
   const messageUsage = new Map<string, UsageSummary>();
   let anonymousMessage = 0;
   const observedTotals = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 };
+  // Prompt size of the latest main-loop call; subagent sidechains carry a
+  // parent tool use and do not grow the resumable session.
+  let contextTokens: number | null = null;
 
   return (stdout: string) => {
     for (const rawLine of stdout.split(/\r?\n/)) {
@@ -110,6 +113,7 @@ export function createClaudeStreamParser() {
           observedTotals.outputTokens += next.outputTokens - (previous?.outputTokens ?? 0);
           observedTotals.cachedInputTokens += next.cachedInputTokens - (previous?.cachedInputTokens ?? 0);
           messageUsage.set(key, next);
+          if (!asString(event.parent_tool_use_id, "")) contextTokens = next.inputTokens + next.cachedInputTokens;
         }
         const content = Array.isArray(message.content) ? message.content : [];
         for (const entry of content) {
@@ -136,6 +140,7 @@ export function createClaudeStreamParser() {
         costUsd: null as number | null,
         usage: messageUsage.size ? { ...observedTotals } : null,
         usageBasis: "per_run" as const,
+        contextTokens,
         summary: assistantTexts.join("\n\n").trim(),
         resultJson: null as Record<string, unknown> | null,
       };
@@ -160,6 +165,7 @@ export function createClaudeStreamParser() {
       // modelUsage covers exactly this CLI invocation, so mark it per-run to
       // keep the server from applying its session-cumulative delta heuristic.
       usageBasis: "per_run" as const,
+      contextTokens,
       summary,
       resultJson: finalResult,
     };

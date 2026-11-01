@@ -2,8 +2,22 @@ export interface SessionCompactionPolicy {
   enabled: boolean;
   maxSessionRuns: number;
   maxRawInputTokens: number;
+  /**
+   * Rotate when the provider context of the latest run in the session (the
+   * prompt size of its last model call, not the per-run token sum) reached
+   * this many tokens. 0 disables the check. Absent in a declared adapter
+   * default means DEFAULT_MAX_SESSION_CONTEXT_TOKENS.
+   */
+  maxSessionContextTokens?: number;
   maxSessionAgeHours: number;
 }
+
+/**
+ * Resuming a provider session re-sends its whole context, and prompt caches
+ * expire between wakes. Past this size a fresh session with the bounded
+ * Paperclip handoff costs less than a resume, even with native compaction.
+ */
+export const DEFAULT_MAX_SESSION_CONTEXT_TOKENS = 200_000;
 
 export type NativeContextManagement = "confirmed" | "likely" | "unknown" | "none";
 
@@ -24,15 +38,19 @@ const DEFAULT_SESSION_COMPACTION_POLICY: SessionCompactionPolicy = {
   enabled: true,
   maxSessionRuns: 200,
   maxRawInputTokens: 2_000_000,
+  maxSessionContextTokens: DEFAULT_MAX_SESSION_CONTEXT_TOKENS,
   maxSessionAgeHours: 72,
 };
 
 // Adapters with native context management still participate in session resume,
-// but Paperclip should not rotate them using threshold-based compaction.
+// but Paperclip should not rotate them using run-count, age or per-run token
+// thresholds. The context ceiling still applies: native compaction keeps a
+// session under the model window, not under a cost-effective resume size.
 const ADAPTER_MANAGED_SESSION_POLICY: SessionCompactionPolicy = {
   enabled: true,
   maxSessionRuns: 0,
   maxRawInputTokens: 0,
+  maxSessionContextTokens: DEFAULT_MAX_SESSION_CONTEXT_TOKENS,
   maxSessionAgeHours: 0,
 };
 
@@ -151,11 +169,13 @@ export function readSessionCompactionOverride(runtimeConfig: unknown): Partial<S
   const enabled = readBoolean(compaction.enabled);
   const maxSessionRuns = readNumber(compaction.maxSessionRuns);
   const maxRawInputTokens = readNumber(compaction.maxRawInputTokens);
+  const maxSessionContextTokens = readNumber(compaction.maxSessionContextTokens);
   const maxSessionAgeHours = readNumber(compaction.maxSessionAgeHours);
 
   if (enabled !== undefined) explicit.enabled = enabled;
   if (maxSessionRuns !== undefined) explicit.maxSessionRuns = maxSessionRuns;
   if (maxRawInputTokens !== undefined) explicit.maxRawInputTokens = maxRawInputTokens;
+  if (maxSessionContextTokens !== undefined) explicit.maxSessionContextTokens = maxSessionContextTokens;
   if (maxSessionAgeHours !== undefined) explicit.maxSessionAgeHours = maxSessionAgeHours;
 
   return explicit;
@@ -179,6 +199,8 @@ export function resolveSessionCompactionPolicy(
       enabled: explicitOverride.enabled ?? basePolicy.enabled,
       maxSessionRuns: explicitOverride.maxSessionRuns ?? basePolicy.maxSessionRuns,
       maxRawInputTokens: explicitOverride.maxRawInputTokens ?? basePolicy.maxRawInputTokens,
+      maxSessionContextTokens: explicitOverride.maxSessionContextTokens ??
+        basePolicy.maxSessionContextTokens ?? DEFAULT_MAX_SESSION_CONTEXT_TOKENS,
       maxSessionAgeHours: explicitOverride.maxSessionAgeHours ?? basePolicy.maxSessionAgeHours,
     },
     adapterSessionManagement,
@@ -193,7 +215,8 @@ export function resolveSessionCompactionPolicy(
 
 export function hasSessionCompactionThresholds(policy: Pick<
   SessionCompactionPolicy,
-  "maxSessionRuns" | "maxRawInputTokens" | "maxSessionAgeHours"
+  "maxSessionRuns" | "maxRawInputTokens" | "maxSessionAgeHours" | "maxSessionContextTokens"
 >) {
-  return policy.maxSessionRuns > 0 || policy.maxRawInputTokens > 0 || policy.maxSessionAgeHours > 0;
+  return policy.maxSessionRuns > 0 || policy.maxRawInputTokens > 0 || policy.maxSessionAgeHours > 0 ||
+    (policy.maxSessionContextTokens ?? 0) > 0;
 }

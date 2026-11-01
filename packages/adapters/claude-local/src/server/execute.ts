@@ -1275,6 +1275,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       usage,
       usageByModel: claudeModelReceipts(parsed.modelUsage),
       ...(usageBasis ? { usageBasis } : {}),
+      ...(parsedStream.contextTokens !== null ? { sessionContextTokens: parsedStream.contextTokens } : {}),
       sessionId: resolvedSessionId,
       sessionParams: resolvedSessionParams,
       sessionDisplayId: resolvedSessionId,
