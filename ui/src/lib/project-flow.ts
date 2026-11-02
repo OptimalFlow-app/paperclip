@@ -1,4 +1,5 @@
 import type {
+  ProjectFlowCase,
   ProjectFlowPrincipal,
   ProjectFlowRoleRef,
   ProjectFlowStage,
@@ -24,6 +25,29 @@ export const flowStepStateLabel: Record<ProjectFlowStepState, string> = {
   not_started: "Not started",
   cancelled: "Cancelled",
 };
+
+/**
+ * One state for a whole deliverable, used to filter the flow: closed cases
+ * keep their terminal state, otherwise the most urgent state among its steps
+ * wins (blocked, then waiting, then in progress). A step with a live run counts
+ * as in progress, as it is drawn.
+ */
+export function flowCaseState(
+  flowCase: Pick<ProjectFlowCase, "terminalKind" | "steps" | "progress">,
+  liveAgentsByIssueId?: ReadonlyMap<string, readonly string[]>,
+): ProjectFlowStepState {
+  if (flowCase.terminalKind === "cancelled") return "cancelled";
+  if (flowCase.terminalKind === "done") return "done";
+  if (flowCase.progress.total > 0 && flowCase.progress.done >= flowCase.progress.total) return "done";
+  const states = new Set(flowCase.steps.map((step) => {
+    const live = step.issue ? (liveAgentsByIssueId?.get(step.issue.id)?.length ?? 0) > 0 : false;
+    return step.state === "not_started" && live ? "active" : step.state;
+  }));
+  for (const state of ["blocked", "waiting", "active"] as const) if (states.has(state)) return state;
+  // Some stages validated, the next one not opened yet: still under way.
+  if (states.has("done")) return "active";
+  return "not_started";
+}
 
 export type FlowPersonRole = "working" | "confirms" | "author" | "verifier";
 

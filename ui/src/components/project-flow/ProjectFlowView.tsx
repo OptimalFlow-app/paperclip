@@ -1,4 +1,4 @@
-import { useMemo, type CSSProperties } from "react";
+import { useCallback, useMemo, useState, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Check, RotateCcw, X } from "lucide-react";
 import type {
@@ -23,6 +23,7 @@ import { buildCompanyUserProfileMap, type CompanyUserProfile } from "@/lib/compa
 import { createIssueDetailPath } from "@/lib/issueDetailBreadcrumb";
 import { isLiveIssueRun } from "@/lib/liveIssueIds";
 import {
+  flowCaseState,
   flowPersonRoleLabel,
   flowStepPeople,
   flowStepStateLabel,
@@ -33,10 +34,106 @@ import { queryKeys } from "@/lib/queryKeys";
 import { Link } from "@/lib/router";
 import { cn } from "@/lib/utils";
 
-const LEGEND_STATES: ProjectFlowStepState[] = ["done", "active", "waiting", "blocked", "not_started"];
+const LEGEND_STATES: ProjectFlowStepState[] = ["done", "active", "waiting", "blocked", "not_started", "cancelled"];
 // Case transitions do not emit live events yet; issue activity refreshes the
 // view through the "issues" prefix, this catches stage moves in between.
 const FLOW_REFETCH_MS = 30_000;
+
+function hiddenStatesStorageKey(projectId: string) {
+  return `paperclip:project-flow:hidden-states:${projectId}`;
+}
+
+function readHiddenStates(projectId: string): ProjectFlowStepState[] {
+  try {
+    const raw = window.localStorage.getItem(hiddenStatesStorageKey(projectId));
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return LEGEND_STATES.filter((state) => parsed.includes(state));
+  } catch {
+    return [];
+  }
+}
+
+function writeHiddenStates(projectId: string, states: ProjectFlowStepState[]) {
+  try {
+    if (states.length === 0) window.localStorage.removeItem(hiddenStatesStorageKey(projectId));
+    else window.localStorage.setItem(hiddenStatesStorageKey(projectId), JSON.stringify(states));
+  } catch {
+    // Ignore localStorage failures.
+  }
+}
+
+/** Deliverable states hidden from the flow, kept per project in this browser. */
+function useHiddenStates(projectId: string) {
+  const [state, setState] = useState(() => ({ projectId, hidden: readHiddenStates(projectId) }));
+  const hidden = state.projectId === projectId ? state.hidden : readHiddenStates(projectId);
+  const setHidden = useCallback((next: ProjectFlowStepState[]) => {
+    writeHiddenStates(projectId, next);
+    setState({ projectId, hidden: next });
+  }, [projectId]);
+  return [hidden, setHidden] as const;
+}
+
+function FlowFilter({
+  counts,
+  hidden,
+  onChange,
+}: {
+  counts: Map<ProjectFlowStepState, number>;
+  hidden: ProjectFlowStepState[];
+  onChange: (hidden: ProjectFlowStepState[]) => void;
+}) {
+  const toggle = (state: ProjectFlowStepState) =>
+    onChange(hidden.includes(state) ? hidden.filter((s) => s !== state) : [...hidden, state]);
+  const only = (state: ProjectFlowStepState) => onChange(LEGEND_STATES.filter((s) => s !== state));
+  return (
+    <div className="flex flex-wrap items-center gap-x-1 gap-y-1 text-xs text-muted-foreground" role="group" aria-label="Filter deliverables by state">
+      {LEGEND_STATES.map((state) => {
+        const shown = !hidden.includes(state);
+        return (
+          <span key={state} className="group inline-flex items-center rounded-full border" data-flow-filter={state}>
+            <button
+              type="button"
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full py-0.5 pl-2 pr-1.5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                shown ? "text-foreground" : "line-through opacity-50",
+              )}
+              aria-pressed={shown}
+              title={shown ? "Hide these deliverables" : "Show these deliverables"}
+              onClick={() => toggle(state)}
+            >
+              <span className="status-fill inline-flex size-2.5 rounded-full" style={hue(flowStepStateVar[state])} aria-hidden />
+              {flowStepStateLabel[state]}
+              <span className="font-mono text-muted-foreground">{counts.get(state) ?? 0}</span>
+            </button>
+            <button
+              type="button"
+              className="hidden rounded-full py-0.5 pl-0.5 pr-2 text-muted-foreground hover:text-foreground hover:underline focus-visible:inline focus-visible:outline-none group-hover:inline group-focus-within:inline"
+              title={`Show only ${flowStepStateLabel[state].toLowerCase()} deliverables`}
+              aria-label={`Show only ${flowStepStateLabel[state]}`}
+              onClick={() => only(state)}
+            >
+              only
+            </button>
+          </span>
+        );
+      })}
+      {hidden.length > 0 ? (
+        <button
+          type="button"
+          className="px-1.5 py-0.5 text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={() => onChange([])}
+        >
+          Show all
+        </button>
+      ) : null}
+      <span className="ml-2 inline-flex items-center gap-1">
+        <RotateCcw className="size-3" aria-hidden />
+        Review rounds used / max
+      </span>
+    </div>
+  );
+}
 
 function hue(cssVar: string): CSSProperties {
   return { "--sc": `var(${cssVar})` } as CSSProperties;
@@ -294,19 +391,23 @@ function CaseRow({
 
 function PipelineFlow({
   pipeline,
+  visibleCases,
   liveAgentsByIssueId,
   directory,
 }: {
   pipeline: ProjectFlowPipeline;
+  visibleCases: ProjectFlowCase[];
   liveAgentsByIssueId: Map<string, string[]>;
   directory: FlowDirectory;
 }) {
+  const total = pipeline.cases.length;
   return (
     <section className="flex flex-col gap-2" aria-label={pipeline.name}>
       <div className="flex items-baseline gap-2">
         <h2 className="text-base font-semibold">{pipeline.name}</h2>
         <span className="text-xs text-muted-foreground">
-          {pipeline.cases.length} {pipeline.cases.length === 1 ? "deliverable" : "deliverables"}
+          {visibleCases.length < total ? `${visibleCases.length} of ` : ""}
+          {total} {total === 1 ? "deliverable" : "deliverables"}
         </span>
       </div>
       {pipeline.description ? <p className="text-sm text-muted-foreground">{pipeline.description}</p> : null}
@@ -320,10 +421,12 @@ function PipelineFlow({
               </span>
             ))}
           </div>
-          {pipeline.cases.length === 0 ? (
+          {total === 0 ? (
             <p className="border-t py-4 text-sm text-muted-foreground">No deliverable in this flow yet.</p>
+          ) : visibleCases.length === 0 ? (
+            <p className="border-t py-4 text-sm text-muted-foreground">No deliverable matches the filter.</p>
           ) : (
-            pipeline.cases.map((flowCase) => (
+            visibleCases.map((flowCase) => (
               <CaseRow
                 key={flowCase.id}
                 pipeline={pipeline}
@@ -389,6 +492,20 @@ export function ProjectFlowView({ projectId, companyId }: { projectId: string; c
     return byIssue;
   }, [liveRuns, pipelines]);
 
+  const [hiddenStates, setHiddenStates] = useHiddenStates(projectId);
+  const caseStates = useMemo(() => {
+    const byCase = new Map<string, ProjectFlowStepState>();
+    for (const pipeline of pipelines ?? []) {
+      for (const flowCase of pipeline.cases) byCase.set(flowCase.id, flowCaseState(flowCase, liveAgentsByIssueId));
+    }
+    return byCase;
+  }, [pipelines, liveAgentsByIssueId]);
+  const stateCounts = useMemo(() => {
+    const counts = new Map<ProjectFlowStepState, number>();
+    for (const state of caseStates.values()) counts.set(state, (counts.get(state) ?? 0) + 1);
+    return counts;
+  }, [caseStates]);
+
   if (flowQuery.isLoading) {
     return <p className="py-6 text-sm text-muted-foreground">Loading the project flow…</p>;
   }
@@ -409,22 +526,12 @@ export function ProjectFlowView({ projectId, companyId }: { projectId: string; c
 
   return (
     <div className="flex flex-col gap-6" data-testid="project-flow">
-      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground" aria-label="Legend">
-        {LEGEND_STATES.map((state) => (
-          <span key={state} className="inline-flex items-center gap-1.5">
-            <span className="status-fill inline-flex size-2.5 rounded-full" style={hue(flowStepStateVar[state])} aria-hidden />
-            {flowStepStateLabel[state]}
-          </span>
-        ))}
-        <span className="inline-flex items-center gap-1">
-          <RotateCcw className="size-3" aria-hidden />
-          Review rounds used / max
-        </span>
-      </div>
+      <FlowFilter counts={stateCounts} hidden={hiddenStates} onChange={setHiddenStates} />
       {pipelines.map((pipeline) => (
         <PipelineFlow
           key={pipeline.id}
           pipeline={pipeline}
+          visibleCases={pipeline.cases.filter((flowCase) => !hiddenStates.includes(caseStates.get(flowCase.id) ?? "not_started"))}
           liveAgentsByIssueId={liveAgentsByIssueId}
           directory={directory}
         />
