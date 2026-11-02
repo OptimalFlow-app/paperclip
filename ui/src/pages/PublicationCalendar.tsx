@@ -566,6 +566,34 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
     onError: (error) => notify(`Couldn't update the post: ${(error as Error).message}`, "warn"),
   });
 
+  const setValidated = useMutation({
+    mutationFn: async (validated: boolean) => {
+      const doc = await issuesApi.getDocument(entry.issueId, PUBLICATION_DOCUMENT_KEY);
+      const body = updatePublicationPost(doc.body, entry.postIndex, { status: validated ? "ready" : "draft" });
+      return issuesApi.upsertDocument(entry.issueId, PUBLICATION_DOCUMENT_KEY, {
+        title: doc.title,
+        format: doc.format,
+        body,
+        baseRevisionId: doc.latestRevisionId,
+        changeSummary: `${meta.label} post ${validated ? "validated" : "unvalidated"} from the calendar`,
+      });
+    },
+    onSuccess: (_doc, validated) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.issues.documents(entry.issueId) });
+      notify(validated ? "Validated — will go out in its slot" : "Validation removed");
+    },
+    onError: (error) => notify(`Couldn't update the post: ${(error as Error).message}`, "warn"),
+  });
+
+  const openTaskButton = (
+    <Button size="lg" variant="outline" asChild>
+      <Link to={issueUrl({ id: entry.issueId, identifier: entry.issueIdentifier })}>
+        <ExternalLink className="h-4 w-4" />
+        Open task {entry.issueIdentifier ?? ""}
+      </Link>
+    </Button>
+  );
+
   return (
     <>
       <SheetHeader className="gap-1 pr-10">
@@ -608,13 +636,27 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
 
         {entry.status !== "published" ? (
           <div className="flex flex-col gap-2">
-            <Button size="lg" onClick={() => void handOff()} style={{ background: meta.color, color: "#fff" }}>
-              <Send className="h-4 w-4" />
-              Post on {meta.label}
-            </Button>
+            <div className="grid grid-cols-3 gap-2">
+              <Button size="lg" onClick={() => void handOff()} style={{ background: meta.color, color: "#fff" }}>
+                <Send className="h-4 w-4" />
+                Post on {meta.label}
+              </Button>
+              {openTaskButton}
+              <Button
+                size="lg"
+                variant={entry.status === "ready" ? "outline" : "default"}
+                disabled={setValidated.isPending}
+                onClick={() => setValidated.mutate(entry.status !== "ready")}
+              >
+                {entry.status === "ready" ? <Undo2 className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+                {entry.status === "ready" ? "Unvalidate" : "Validate"}
+              </Button>
+            </div>
             <p className="text-xs text-muted-foreground">{handOffHint(meta.label, meta.prefillsText, !!firstImage)}</p>
           </div>
-        ) : null}
+        ) : (
+          <div className="grid grid-cols-3 gap-2">{openTaskButton}</div>
+        )}
 
         {images.length > 0 ? (
           <section className="flex flex-col gap-2">
@@ -679,12 +721,6 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
           >
             {entry.status === "published" ? <Undo2 className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}
             {entry.status === "published" ? "Mark as not published" : "Mark as published"}
-          </Button>
-          <Button size="sm" variant="ghost" asChild>
-            <Link to={issueUrl({ id: entry.issueId, identifier: entry.issueIdentifier })}>
-              <ExternalLink className="h-3.5 w-3.5" />
-              Open task {entry.issueIdentifier ?? ""}
-            </Link>
           </Button>
         </div>
       </div>
