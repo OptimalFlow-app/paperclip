@@ -387,6 +387,12 @@ look like a zero-loss restart.
 
 A healthy guarded deploy must compare the report against `/api/health` (`version` or `serverVersion`) and treat any `lostRunIds` entry as a continuity failure that needs recovery before marking deployment complete.
 
+### Safe restart of a local `paperclipai run` instance
+
+From the checkout the server runs from, `pnpm safe-restart --issue <ISSUE> [--branch <expected>] [--idle-timeout 20m] [--instance <id>]` checks the branch, a clean tree, installed lockfile and restart lock, then returns while a detached worker waits for zero live runs, writes the hot-restart marker above, stops the server and its embedded PostgreSQL (never `kill -9`), relaunches `pnpm paperclipai run` with agent-run `PAPERCLIP_*` variables removed, and comments `<ISSUE>` with the outcome.
+A pending migration containing `DROP` (except `DROP DEFAULT`/`DROP NOT NULL`), `TRUNCATE`, `DELETE FROM`, `ALTER COLUMN … TYPE` or `RENAME` aborts before anything stops; ordinary migrations are backed up (`scripts/backup-db.sh`) and applied on startup.
+The worker log is `$PAPERCLIP_HOME/instances/<id>/logs/safe-restart-*.log`; if the server does not come back after one retry, it sends a macOS notification and writes `instances/<id>/data/safe-restart-last.json`.
+
 ### Recovering a deploy blocked by missing process metadata
 
 If the currently installed version already has a running local-agent heartbeat
