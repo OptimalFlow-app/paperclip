@@ -294,6 +294,23 @@ export function countLiveRuns(payloads: unknown[]): { count: number; runIds: str
   return { count: runIds.length, runIds };
 }
 
+/**
+ * `paperclipai db:backup` prints a clack spinner even without a TTY: drop ANSI
+ * codes, spinner frames and Node warnings so the log and the comment stay readable.
+ */
+export function cleanCliOutput(text: string): string[] {
+  return text
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "\n")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^.*[◒◐◓◑]\s*Creating database backup\.*\s*/, "").trim())
+    .filter((line) => line && line !== "│" && !/^\(node:\d+\)|^\(Use `node/.test(line));
+}
+
+export function extractBackupPath(text: string): string | null {
+  const match = /Backup saved: (\S+)/.exec(cleanCliOutput(text).join("\n"));
+  return match ? match[1] : null;
+}
+
 export interface RestartOutcome {
   status: "succeeded" | "aborted" | "failed";
   reason: string | null;
@@ -306,6 +323,7 @@ export interface RestartOutcome {
   previousProcessStartedAt: string | null;
   newProcessStartedAt: string | null;
   pendingMigrations: string[];
+  backupPath: string | null;
   destructive: Array<{ file: string; findings: DestructiveFinding[] }>;
   idle: { reachedZero: boolean; remainingRunIds: string[]; waitedMs: number } | null;
   report: {
@@ -339,8 +357,9 @@ export function formatOutcomeComment(outcome: RestartOutcome): string {
     `- Instance : \`${outcome.instanceId}\`, branche \`${outcome.branch ?? "?"}\`, commit \`${outcome.commit?.slice(0, 9) ?? "?"}\``,
     `- Durée : ${formatDurationMs(Number.isFinite(duration) ? duration : 0)}`,
     `- Serveur : démarré le ${outcome.previousProcessStartedAt ?? "?"} → ${outcome.newProcessStartedAt ?? "pas de nouveau processus"}`,
-    `- Migrations en attente : ${outcome.pendingMigrations.length === 0 ? "aucune" : outcome.pendingMigrations.map((name) => `\`${name}\``).join(", ")}`,
+    `- Migrations ${outcome.status === "succeeded" && outcome.pendingMigrations.length > 0 ? "appliquées" : "en attente"} : ${outcome.pendingMigrations.length === 0 ? "aucune" : outcome.pendingMigrations.map((name) => `\`${name}\``).join(", ")}`,
   );
+  if (outcome.backupPath) lines.push(`- Sauvegarde : \`${outcome.backupPath}\``);
   if (outcome.idle) {
     lines.push(outcome.idle.reachedZero
       ? `- Attente d'inactivité : zéro run atteint après ${formatDurationMs(outcome.idle.waitedMs)}`
@@ -738,6 +757,7 @@ async function runWorker() {
     previousProcessStartedAt: state.previousProcessStartedAt,
     newProcessStartedAt: null,
     pendingMigrations: [],
+    backupPath: null,
     destructive: [],
     idle: null,
     report: null,
@@ -832,8 +852,13 @@ async function runWorker() {
     if (outcome.pendingMigrations.length > 0) {
       log("backing up the database before applying migrations");
       const backup = run(path.join(REPO_ROOT, "scripts", "backup-db.sh"), [], { cwd: REPO_ROOT, env: state.relaunchEnv });
-      log(backup.stdout.trim().split("\n").slice(-5).join("\n"));
-      if (backup.status !== 0) throw new Abort(`la sauvegarde de la base a échoué : ${backup.stderr.trim().split("\n").slice(-3).join(" ")}`);
+      log(cleanCliOutput(backup.stdout).slice(-5).join("\n"));
+      if (backup.status !== 0) throw new Abort(`la sauvegarde de la base a échoué : ${cleanCliOutput(backup.stderr).slice(-3).join(" ")}`);
+      outcome.backupPath = extractBackupPath(backup.stdout);
+      if (!outcome.backupPath || !fs.existsSync(outcome.backupPath)) {
+        throw new Abort(`la sauvegarde a rendu la main sans fichier de sauvegarde lisible (${outcome.backupPath ?? "chemin absent de la sortie"})`);
+      }
+      log(`backup file: ${outcome.backupPath}`);
     }
 
     // 4. Hot-restart marker, SIGTERM, wait for server and embedded PostgreSQL.

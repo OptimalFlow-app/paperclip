@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildRelaunchEnv,
+  cleanCliOutput,
   countLiveRuns,
   DEFAULT_IDLE_TIMEOUT_MS,
+  extractBackupPath,
   findDestructiveStatements,
   formatOutcomeComment,
   parseArgs,
@@ -215,6 +217,7 @@ describe("formatOutcomeComment", () => {
     previousProcessStartedAt: "2026-11-02T09:00:00.000Z",
     newProcessStartedAt: null,
     pendingMigrations: ["0313_drop.sql"],
+    backupPath: null,
     destructive: [{ file: "0313_drop.sql", findings: [{ line: 3, kind: "drop", text: 'ALTER TABLE "x" DROP COLUMN `y`;' }] }],
     idle: null,
     report: null,
@@ -247,5 +250,47 @@ describe("formatOutcomeComment", () => {
     expect(body).toContain("échéance atteinte, runs encore actifs : `r1`");
     expect(body).toContain("Runs adoptés : `r1`");
     expect(body).toContain("Runs perdus : aucun");
+  });
+
+  it("lists applied migrations and the backup file on success", () => {
+    const body = formatOutcomeComment({
+      ...outcome,
+      status: "succeeded",
+      reason: null,
+      destructive: [],
+      pendingMigrations: ["0313_probe.sql"],
+      backupPath: "/tmp/backups/paperclip-20261102-033442.sql.gz",
+    });
+    expect(body).toContain("Migrations appliquées : `0313_probe.sql`");
+    expect(body).toContain("Sauvegarde : `/tmp/backups/paperclip-20261102-033442.sql.gz`");
+  });
+});
+
+describe("cleanCliOutput / extractBackupPath", () => {
+  // Captured from `paperclipai db:backup` run by the worker (OPT-413).
+  const stdout = [
+    "│  Retention: 30 day(s)",
+    "\x1b[?25l│",
+    "◒  Creating database backup\x1b[1G\x1b[J◐  Creating database backup.\x1b[1G\x1b[J◇  Backup saved: /tmp/backups/paperclip-20261102-033442.sql.gz (68.6K)",
+    "\x1b[?25h│",
+    "└  Backup completed.",
+  ].join("\n");
+
+  it("drops ANSI codes and spinner frames", () => {
+    expect(cleanCliOutput(stdout)).toEqual([
+      "│  Retention: 30 day(s)",
+      "◇  Backup saved: /tmp/backups/paperclip-20261102-033442.sql.gz (68.6K)",
+      "└  Backup completed.",
+    ]);
+  });
+
+  it("drops Node warnings from stderr", () => {
+    const stderr = "(node:48889) PromiseRejectionHandledWarning: Promise rejection was handled asynchronously\n(Use `node --trace-warnings ...` to show where the warning was created)\nEACCES: permission denied";
+    expect(cleanCliOutput(stderr)).toEqual(["EACCES: permission denied"]);
+  });
+
+  it("extracts the backup file path", () => {
+    expect(extractBackupPath(stdout)).toBe("/tmp/backups/paperclip-20261102-033442.sql.gz");
+    expect(extractBackupPath("└  Backup completed.")).toBeNull();
   });
 });
