@@ -4,7 +4,7 @@
  * post — caption and image to the clipboard / downloads, network opened in a
  * new tab. Data contract lives in `lib/publication-calendar.ts`.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CalendarDays,
@@ -26,17 +26,19 @@ import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useOptionalToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
 import { copyImageToClipboard, copyTextToClipboard } from "../lib/clipboard";
-import { Link } from "@/lib/router";
+import { Link, useSearchParams } from "@/lib/router";
 import { cn, issueUrl } from "../lib/utils";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
+  CALENDAR_POST_PARAM,
   PUBLICATION_DOCUMENT_KEY,
   PUBLICATION_LABEL_NAME,
   attachmentContentUrl,
   dayKey,
+  entryToOpen,
   gridHourRange,
   isSameDay,
   networkMeta,
@@ -122,6 +124,22 @@ export function PublicationCalendar() {
     });
     return all.sort((a, b) => a.start.getTime() - b.start.getTime());
   }, [issues, documentQueries]);
+
+  // A link from elsewhere (the project flow) names a task: once its post is
+  // loaded, land on its day and open it, once per link so closing stays closed.
+  const [searchParams] = useSearchParams();
+  const focusIssueId = searchParams.get(CALENDAR_POST_PARAM);
+  const focusIndex = focusIssueId ? issues.findIndex((issue) => issue.id === focusIssueId) : -1;
+  const focusReady = !!focusIssueId && issuesQuery.isSuccess && (focusIndex < 0 || documentQueries[focusIndex]?.isPending === false);
+  const focusedIssueId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusIssueId || !focusReady || focusedIssueId.current === focusIssueId) return;
+    focusedIssueId.current = focusIssueId;
+    const entry = entryToOpen(entries, focusIssueId);
+    if (!entry) return;
+    setAnchor(startOfDay(entry.start));
+    setSelectedKey(entry.key);
+  }, [focusIssueId, focusReady, entries]);
 
   const days = useMemo(() => visibleDays(anchor, view), [anchor, view]);
   const selected = entries.find((entry) => entry.key === selectedKey) ?? null;

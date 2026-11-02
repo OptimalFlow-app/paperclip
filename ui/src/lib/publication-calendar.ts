@@ -147,6 +147,19 @@ export function toPublicationEntries(
   });
 }
 
+/** `/calendar?post=<issueId>` lands on the day of that task's post with its detail open (OPT-400). */
+export const CALENDAR_POST_PARAM = "post";
+
+export function publicationCalendarPath(issueId: string) {
+  return `/calendar?${CALENDAR_POST_PARAM}=${encodeURIComponent(issueId)}`;
+}
+
+/** The post of a task to open from a link: its first one not yet published, else its last. */
+export function entryToOpen(entries: PublicationEntry[], issueId: string): PublicationEntry | null {
+  const own = entries.filter((entry) => entry.issueId === issueId);
+  return own.find((entry) => entry.status !== "published") ?? own[own.length - 1] ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Networks
 

@@ -13,6 +13,7 @@ import type {
 import { accessApi } from "@/api/access";
 import { agentsApi } from "@/api/agents";
 import { heartbeatsApi, type LiveRunForIssue } from "@/api/heartbeats";
+import { issuesApi } from "@/api/issues";
 import { projectsApi } from "@/api/projects";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { deriveInitials } from "@/components/Identity";
@@ -22,6 +23,7 @@ import { formatUserLabel } from "@/lib/assignees";
 import { buildCompanyUserProfileMap, type CompanyUserProfile } from "@/lib/company-members";
 import { createIssueDetailPath } from "@/lib/issueDetailBreadcrumb";
 import { isLiveIssueRun } from "@/lib/liveIssueIds";
+import { PUBLICATION_LABEL_NAME, publicationCalendarPath } from "@/lib/publication-calendar";
 import {
   flowCaseState,
   flowPersonRoleLabel,
@@ -327,25 +329,39 @@ function minWidthStyle(stageCount: number): CSSProperties {
   return { minWidth: `${10 + stageCount * 7.5}rem` };
 }
 
+/** The case's task that carries a scheduled post, if any (origin first, then stage tasks). */
+function publicationIssueId(flowCase: ProjectFlowCase, publicationIssueIds: Set<string>) {
+  const ids = [flowCase.originIssue?.id, ...flowCase.steps.map((step) => step.issue?.id)];
+  return ids.find((id): id is string => !!id && publicationIssueIds.has(id)) ?? null;
+}
+
 function CaseRow({
   pipeline,
   flowCase,
   liveAgentsByIssueId,
+  publicationIssueIds,
   directory,
 }: {
   pipeline: ProjectFlowPipeline;
   flowCase: ProjectFlowCase;
   liveAgentsByIssueId: Map<string, string[]>;
+  publicationIssueIds: Set<string>;
   directory: FlowDirectory;
 }) {
   const percent = flowCase.progress.total > 0 ? Math.round((flowCase.progress.done / flowCase.progress.total) * 100) : 0;
   const origin = flowCase.originIssue;
+  const postIssueId = publicationIssueId(flowCase, publicationIssueIds);
+  const titleClass = cn("text-sm font-medium", flowCase.terminalKind === "cancelled" && "text-muted-foreground line-through");
   return (
     <div className="grid items-start gap-x-1 border-t py-3" style={gridStyle(pipeline.stages.length)} data-testid="project-flow-case">
       <div className="flex min-w-0 flex-col gap-1 pr-2">
-        <span className={cn("text-sm font-medium", flowCase.terminalKind === "cancelled" && "text-muted-foreground line-through")}>
-          {flowCase.title}
-        </span>
+        {postIssueId ? (
+          <Link to={publicationCalendarPath(postIssueId)} className={cn(titleClass, "hover:underline")} title="Open the post in the calendar">
+            {flowCase.title}
+          </Link>
+        ) : (
+          <span className={titleClass}>{flowCase.title}</span>
+        )}
         {origin ? (
           <Link
             to={createIssueDetailPath(origin.identifier ?? origin.id)}
@@ -393,11 +409,13 @@ function PipelineFlow({
   pipeline,
   visibleCases,
   liveAgentsByIssueId,
+  publicationIssueIds,
   directory,
 }: {
   pipeline: ProjectFlowPipeline;
   visibleCases: ProjectFlowCase[];
   liveAgentsByIssueId: Map<string, string[]>;
+  publicationIssueIds: Set<string>;
   directory: FlowDirectory;
 }) {
   const total = pipeline.cases.length;
@@ -432,6 +450,7 @@ function PipelineFlow({
                 pipeline={pipeline}
                 flowCase={flowCase}
                 liveAgentsByIssueId={liveAgentsByIssueId}
+                publicationIssueIds={publicationIssueIds}
                 directory={directory}
               />
             ))
@@ -467,6 +486,22 @@ export function ProjectFlowView({ projectId, companyId }: { projectId: string; c
     queryKey: queryKeys.access.companyUserDirectory(companyId),
     queryFn: () => accessApi.listUserDirectory(companyId),
   });
+
+  // Same queries as the publication calendar, so its cache is shared.
+  const { data: labels } = useQuery({
+    queryKey: queryKeys.issues.labels(companyId),
+    queryFn: () => issuesApi.listLabels(companyId),
+  });
+  const publicationLabelId = labels?.find((label) => label.name.trim().toLowerCase() === PUBLICATION_LABEL_NAME)?.id ?? null;
+  const { data: publicationIssues } = useQuery({
+    queryKey: [...queryKeys.issues.list(companyId), "publication-calendar", publicationLabelId],
+    queryFn: () => issuesApi.list(companyId, { labelId: publicationLabelId!, limit: 500 }),
+    enabled: !!publicationLabelId,
+  });
+  const publicationIssueIds = useMemo(
+    () => new Set((publicationIssues ?? []).filter((issue) => issue.status !== "cancelled").map((issue) => issue.id)),
+    [publicationIssues],
+  );
 
   const directory = useMemo<FlowDirectory>(() => ({
     agents: new Map((agents ?? []).map((agent) => [agent.id, agent])),
@@ -533,6 +568,7 @@ export function ProjectFlowView({ projectId, companyId }: { projectId: string; c
           pipeline={pipeline}
           visibleCases={pipeline.cases.filter((flowCase) => !hiddenStates.includes(caseStates.get(flowCase.id) ?? "not_started"))}
           liveAgentsByIssueId={liveAgentsByIssueId}
+          publicationIssueIds={publicationIssueIds}
           directory={directory}
         />
       ))}

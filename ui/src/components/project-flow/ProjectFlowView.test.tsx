@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   liveRunsForCompany: vi.fn(),
   listAgents: vi.fn(),
   listUserDirectory: vi.fn(),
+  listLabels: vi.fn(),
+  listIssues: vi.fn(),
 }));
 
 vi.mock("@/lib/router", () => ({
@@ -24,6 +26,7 @@ vi.mock("@/api/projects", () => ({ projectsApi: { flow: mocks.flow } }));
 vi.mock("@/api/heartbeats", () => ({ heartbeatsApi: { liveRunsForCompany: mocks.liveRunsForCompany } }));
 vi.mock("@/api/agents", () => ({ agentsApi: { list: mocks.listAgents } }));
 vi.mock("@/api/access", () => ({ accessApi: { listUserDirectory: mocks.listUserDirectory } }));
+vi.mock("@/api/issues", () => ({ issuesApi: { listLabels: mocks.listLabels, list: mocks.listIssues } }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -123,6 +126,8 @@ describe("ProjectFlowView", () => {
       { id: "builder", name: "Builder", title: "Fabricant" },
     ]);
     mocks.listUserDirectory.mockResolvedValue({ users: [] });
+    mocks.listLabels.mockResolvedValue([]);
+    mocks.listIssues.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -223,6 +228,29 @@ describe("ProjectFlowView", () => {
     await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Show all")!.click());
     expect(titles()).toEqual(["Deck BPI", "Deck ADEME"]);
     expect(window.localStorage.getItem("paperclip:project-flow:hidden-states:project")).toBeNull();
+  });
+
+  it("links a deliverable title to its post in the calendar when one of its tasks is a publication", async () => {
+    mocks.listLabels.mockResolvedValue([{ id: "pub-label", name: "publication" }]);
+    mocks.listIssues.mockResolvedValue([{ id: "build-task", status: "todo" }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <TooltipProvider>
+            <ProjectFlowView projectId="project" companyId="company" />
+          </TooltipProvider>
+        </QueryClientProvider>,
+      );
+    });
+    const titleLink = () => [...container.querySelectorAll("a")].find((a) => a.textContent === "Deck BPI");
+    for (let attempt = 0; attempt < 20 && !titleLink(); attempt += 1) {
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+    }
+    expect(mocks.listIssues).toHaveBeenCalledWith("company", { labelId: "pub-label", limit: 500 });
+    expect(titleLink()?.getAttribute("href")).toBe("/calendar?post=build-task");
   });
 
   it("explains how to start when the project has no pipeline", async () => {
