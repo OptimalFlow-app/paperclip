@@ -32,6 +32,9 @@ export interface PublicationPost {
   images?: PublicationImage[];
   publishedAt?: string | null;
   publishedUrl?: string | null;
+  /** Set by com-market's auto-publisher (OPT-384) when it takes the post; it never retries one. */
+  publishAttemptedAt?: string | null;
+  publishError?: string | null;
 }
 
 export interface PublicationEntry {

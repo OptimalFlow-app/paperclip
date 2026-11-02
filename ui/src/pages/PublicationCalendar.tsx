@@ -685,7 +685,12 @@ function PostDetail({
   const setValidated = useMutation({
     mutationFn: async (validated: boolean) => {
       const doc = await issuesApi.getDocument(entry.issueId, PUBLICATION_DOCUMENT_KEY);
-      const body = updatePublicationPost(doc.body, entry.postIndex, { status: validated ? "ready" : "draft" });
+      const body = updatePublicationPost(doc.body, entry.postIndex, {
+        status: validated ? "ready" : "draft",
+        // A fresh validation lets the auto-publisher take the post again.
+        publishAttemptedAt: null,
+        publishError: null,
+      });
       return issuesApi.upsertDocument(entry.issueId, PUBLICATION_DOCUMENT_KEY, {
         title: doc.title,
         format: doc.format,
@@ -742,7 +747,11 @@ function PostDetail({
             entry.status === "published" && "border-border bg-muted/40",
           )}
         >
-          {overdue && entry.status === "ready" ? "Slot passed — validated, still to post." : STATUS_LABEL[entry.status]}
+          {entry.status === "ready" && entry.post.publishError
+            ? `Auto-post failed: ${entry.post.publishError}. Unvalidate then Validate to retry.`
+            : overdue && entry.status === "ready"
+              ? "Slot passed — validated, still to post."
+              : STATUS_LABEL[entry.status]}
           {entry.status === "published" && entry.post.publishedAt
             ? ` on ${new Date(entry.post.publishedAt).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`
             : null}
