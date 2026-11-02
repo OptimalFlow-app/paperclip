@@ -11,6 +11,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Copy,
   Download,
   ExternalLink,
@@ -52,6 +53,10 @@ import {
 
 const HOUR_PX = 48;
 const MIN_EVENT_PX = 38;
+const SNAP_MINUTES = 15;
+const DRAG_MIME = "application/x-publication-entry";
+
+type Reschedule = (entry: PublicationEntry, start: Date) => void;
 
 const STATUS_LABEL: Record<PublicationEntry["status"], string> = {
   draft: "Not validated — provisional slot",
@@ -66,6 +71,11 @@ export function PublicationCalendar() {
   const [anchor, setAnchor] = useState(() => startOfDay(new Date()));
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const now = useNow();
+  const reschedulePost = useReschedulePost();
+  const reschedule: Reschedule = (entry, start) => {
+    if (start.getTime() === entry.start.getTime()) return;
+    reschedulePost.mutate({ entry, start });
+  };
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Calendar" }]);
@@ -171,20 +181,83 @@ export function PublicationCalendar() {
       ) : null}
 
       {view === "week" ? (
-        <WeekGrid days={days} entries={entries} now={now} onSelect={setSelectedKey} />
+        <WeekGrid days={days} entries={entries} now={now} onSelect={setSelectedKey} onReschedule={reschedule} />
       ) : (
-        <MonthGrid days={days} month={anchor.getMonth()} entries={entries} now={now} onSelect={setSelectedKey} />
+        <MonthGrid
+          days={days}
+          month={anchor.getMonth()}
+          entries={entries}
+          now={now}
+          onSelect={setSelectedKey}
+          onReschedule={reschedule}
+        />
       )}
 
       <Legend entries={entries} />
 
       <Sheet open={!!selected} onOpenChange={(open) => (open ? null : setSelectedKey(null))}>
         <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-xl">
-          {selected ? <PostDetail entry={selected} now={now} /> : null}
+          {selected ? (
+            <PostDetail entry={selected} now={now} onReschedule={reschedule} pending={reschedulePost.isPending} />
+          ) : null}
         </SheetContent>
       </Sheet>
     </div>
   );
+}
+
+/** Moves one post to a new slot; the status (validated or not) is kept. */
+function useReschedulePost() {
+  const toast = useOptionalToastActions();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ entry, start }: { entry: PublicationEntry; start: Date }) => {
+      const doc = await issuesApi.getDocument(entry.issueId, PUBLICATION_DOCUMENT_KEY);
+      const body = updatePublicationPost(doc.body, entry.postIndex, { scheduledAt: start.toISOString() });
+      return issuesApi.upsertDocument(entry.issueId, PUBLICATION_DOCUMENT_KEY, {
+        title: doc.title,
+        format: doc.format,
+        body,
+        baseRevisionId: doc.latestRevisionId,
+        changeSummary: `${networkMeta(entry.post.network).label} post moved to ${start.toISOString()} from the calendar`,
+      });
+    },
+    onSuccess: (_doc, { entry, start }) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.issues.documents(entry.issueId) });
+      toast?.pushToast({
+        title: `Moved to ${start.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`,
+        tone: "success",
+      });
+    },
+    onError: (error) => toast?.pushToast({ title: `Couldn't move the post: ${(error as Error).message}`, tone: "warn" }),
+  });
+}
+
+function startDrag(event: React.DragEvent<HTMLElement>, entry: PublicationEntry) {
+  const grabOffsetY = event.clientY - event.currentTarget.getBoundingClientRect().top;
+  event.dataTransfer.setData(DRAG_MIME, JSON.stringify({ key: entry.key, grabOffsetY }));
+  event.dataTransfer.effectAllowed = "move";
+}
+
+function readDrag(event: React.DragEvent<HTMLElement>, entries: PublicationEntry[]) {
+  try {
+    const { key, grabOffsetY } = JSON.parse(event.dataTransfer.getData(DRAG_MIME)) as { key: string; grabOffsetY: number };
+    const entry = entries.find((e) => e.key === key);
+    return entry ? { entry, grabOffsetY: grabOffsetY || 0 } : null;
+  } catch {
+    return null;
+  }
+}
+
+function allowDrop(event: React.DragEvent<HTMLElement>) {
+  if (!event.dataTransfer.types.includes(DRAG_MIME)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+}
+
+function toLocalInputValue(date: Date) {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${dayKey(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function useNow() {
@@ -226,11 +299,13 @@ function WeekGrid({
   entries,
   now,
   onSelect,
+  onReschedule,
 }: {
   days: Date[];
   entries: PublicationEntry[];
   now: Date;
   onSelect: (key: string) => void;
+  onReschedule: Reschedule;
 }) {
   const weekEntries = entries.filter((entry) => days.some((day) => isSameDay(day, entry.start)));
   const { first, last } = gridHourRange(weekEntries);
@@ -278,7 +353,21 @@ function WeekGrid({
           {days.map((day) => {
             const dayEntries = layoutLanes(weekEntries.filter((entry) => isSameDay(entry.start, day)));
             return (
-              <div key={dayKey(day)} className={cn("relative border-l border-border", isSameDay(day, now) && "bg-primary/[0.03]")}>
+              <div
+                key={dayKey(day)}
+                className={cn("relative border-l border-border", isSameDay(day, now) && "bg-primary/[0.03]")}
+                onDragOver={allowDrop}
+                onDrop={(event) => {
+                  const dragged = readDrag(event, entries);
+                  if (!dragged) return;
+                  event.preventDefault();
+                  const y = event.clientY - event.currentTarget.getBoundingClientRect().top - dragged.grabOffsetY;
+                  const raw = first * 60 + (y / HOUR_PX) * 60;
+                  const minutes = Math.min(Math.max(Math.round(raw / SNAP_MINUTES) * SNAP_MINUTES, 0), 24 * 60 - SNAP_MINUTES);
+                  const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), Math.floor(minutes / 60), minutes % 60);
+                  onReschedule(dragged.entry, start);
+                }}
+              >
                 {hours.map((hour, i) => (
                   <div key={hour} className="absolute inset-x-0 border-t border-border/60" style={{ top: i * HOUR_PX }} />
                 ))}
@@ -360,6 +449,8 @@ function EventBlock({
   return (
     <button
       type="button"
+      draggable={entry.status !== "published"}
+      onDragStart={(event) => startDrag(event, entry)}
       onClick={() => onSelect(entry.key)}
       title={`${meta.label} · ${entryTitle(entry)}`}
       className={cn(
@@ -401,12 +492,14 @@ function MonthGrid({
   entries,
   now,
   onSelect,
+  onReschedule,
 }: {
   days: Date[];
   month: number;
   entries: PublicationEntry[];
   now: Date;
   onSelect: (key: string) => void;
+  onReschedule: Reschedule;
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
@@ -422,6 +515,17 @@ function MonthGrid({
           return (
             <div
               key={dayKey(day)}
+              onDragOver={allowDrop}
+              onDrop={(event) => {
+                const dragged = readDrag(event, entries);
+                if (!dragged) return;
+                event.preventDefault();
+                const { start } = dragged.entry;
+                onReschedule(
+                  dragged.entry,
+                  new Date(day.getFullYear(), day.getMonth(), day.getDate(), start.getHours(), start.getMinutes()),
+                );
+              }}
               className={cn(
                 "min-h-28 border-border p-1",
                 index % 7 !== 0 && "border-l",
@@ -445,6 +549,8 @@ function MonthGrid({
                     <button
                       key={entry.key}
                       type="button"
+                      draggable={entry.status !== "published"}
+                      onDragStart={(event) => startDrag(event, entry)}
                       onClick={() => onSelect(entry.key)}
                       className={cn(
                         "truncate rounded px-1.5 py-0.5 text-left text-[11px]",
@@ -518,7 +624,17 @@ function NextUpBanner({ entry, now, onOpen }: { entry: PublicationEntry; now: Da
 // ---------------------------------------------------------------------------
 // Post detail + hand-off
 
-function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
+function PostDetail({
+  entry,
+  now,
+  onReschedule,
+  pending,
+}: {
+  entry: PublicationEntry;
+  now: Date;
+  onReschedule: Reschedule;
+  pending: boolean;
+}) {
   const toast = useOptionalToastActions();
   const queryClient = useQueryClient();
   const meta = networkMeta(entry.post.network);
@@ -612,6 +728,9 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
             minute: "2-digit",
           })}
         </SheetDescription>
+        {entry.status !== "published" ? (
+          <RescheduleField key={entry.start.getTime()} entry={entry} onReschedule={onReschedule} pending={pending} />
+        ) : null}
       </SheetHeader>
 
       <div className="flex flex-col gap-5 px-4 pb-6">
@@ -725,6 +844,34 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
         </div>
       </div>
     </>
+  );
+}
+
+function RescheduleField({ entry, onReschedule, pending }: { entry: PublicationEntry; onReschedule: Reschedule; pending: boolean }) {
+  const [value, setValue] = useState(() => toLocalInputValue(entry.start));
+  const next = new Date(value);
+  const changed = !Number.isNaN(next.getTime()) && next.getTime() !== entry.start.getTime();
+  return (
+    <form
+      className="mt-1 flex items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (changed) onReschedule(entry, next);
+      }}
+    >
+      <Clock className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <input
+        type="datetime-local"
+        aria-label="Post date and time"
+        value={value}
+        step={60 * SNAP_MINUTES}
+        onChange={(event) => setValue(event.target.value)}
+        className="h-8 rounded-md border border-border bg-background px-2 text-sm"
+      />
+      <Button type="submit" size="sm" variant={changed ? "default" : "outline"} disabled={!changed || pending}>
+        Change date
+      </Button>
+    </form>
   );
 }
 
