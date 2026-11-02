@@ -654,6 +654,7 @@ async function runLauncher(argv: string[]) {
     `safe-restart: checks passed (branch ${branch}, clean tree, lockfile installed).`,
     `Detached worker pid ${worker.pid} will wait for idle (max ${formatDurationMs(options.idleTimeoutMs)}), restart ${apiBase} and comment ${options.issue}.`,
     `Log: ${logPath}`,
+    `Launcher returned after ${process.uptime().toFixed(2)} s.`,
   ].join("\n"));
   process.exit(0);
 }
@@ -692,6 +693,8 @@ async function runWorker() {
     logTail: [],
   };
   let serverStopped = false;
+  // The launcher recorded the tsx wrapper pid; own the lock with the real worker pid.
+  fs.writeFileSync(paths.lockPath, `${JSON.stringify({ pid: process.pid, createdAt: state.startedAt, logPath: state.logPath })}\n`);
 
   log(`worker pid ${process.pid} (pgid/session detached) for ${apiBase}, server pid ${state.serverPid}, issue ${options.issue}`);
 
@@ -858,15 +861,25 @@ async function runWorker() {
     outcome.newProcessStartedAt = health.processStartedAt;
     log(`server healthy, processStartedAt ${health.processStartedAt}`);
 
-    const report = readJson<{
+    // The new server writes the report shortly after /api/health turns ready.
+    type HotRestartReportFile = {
       completedAt?: string;
-      newServerPid?: number;
+      previousServerPid?: number;
       adoptedRunIds?: string[];
       finalizedWhileDownRunIds?: string[];
       lostRunIds?: string[];
       drainReason?: string | null;
-    }>(paths.reportPath);
-    if (report && report.completedAt && Date.parse(report.completedAt) >= Date.parse(state.startedAt)) {
+    };
+    const isFreshReport = (candidate: HotRestartReportFile | null) => Boolean(candidate?.completedAt
+      && candidate.previousServerPid === state.serverPid
+      && Date.parse(candidate.completedAt) >= Date.parse(state.startedAt));
+    let report = readJson<HotRestartReportFile>(paths.reportPath);
+    const reportDeadline = Date.now() + 2 * 60_000;
+    while (!isFreshReport(report) && Date.now() < reportDeadline) {
+      await sleep(1_000);
+      report = readJson<HotRestartReportFile>(paths.reportPath);
+    }
+    if (report && isFreshReport(report)) {
       outcome.report = {
         adoptedRunIds: report.adoptedRunIds ?? [],
         finalizedWhileDownRunIds: report.finalizedWhileDownRunIds ?? [],
@@ -925,7 +938,7 @@ async function runWorker() {
   }
 
   const lock = readJson<{ pid?: number }>(paths.lockPath);
-  if (lock?.pid === process.pid) fs.rmSync(paths.lockPath, { force: true });
+  if (lock?.pid === process.pid || lock?.pid === process.ppid) fs.rmSync(paths.lockPath, { force: true });
   process.exit(outcome.status === "succeeded" ? 0 : 1);
 }
 
