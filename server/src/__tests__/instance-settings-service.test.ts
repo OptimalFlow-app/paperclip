@@ -3,8 +3,37 @@ import type { InstanceExperimentalSettings } from "@paperclipai/shared";
 import {
   applyExperimentalSettingsPatch,
   normalizeExperimentalSettings,
+  resolveEffectiveMaxConcurrentRuns,
   resolveWorktreeRunExecutionActivationState,
 } from "../services/instance-settings.js";
+
+describe("instance concurrent-run cap", () => {
+  it("defaults to 3 when nothing is stored or the env var is unset", () => {
+    expect(resolveEffectiveMaxConcurrentRuns(undefined, {})).toBe(3);
+    expect(resolveEffectiveMaxConcurrentRuns({} as { maxConcurrentRuns: number }, {})).toBe(3);
+  });
+
+  it("uses the stored general setting", () => {
+    expect(resolveEffectiveMaxConcurrentRuns({ maxConcurrentRuns: 5 }, {})).toBe(5);
+  });
+
+  it("lets PAPERCLIP_MAX_CONCURRENT_RUNS override the setting", () => {
+    expect(
+      resolveEffectiveMaxConcurrentRuns({ maxConcurrentRuns: 5 }, { PAPERCLIP_MAX_CONCURRENT_RUNS: "2" }),
+    ).toBe(2);
+    expect(
+      resolveEffectiveMaxConcurrentRuns(undefined, { PAPERCLIP_MAX_CONCURRENT_RUNS: " 7 " }),
+    ).toBe(7);
+  });
+
+  it("ignores an invalid env override and falls back to the setting", () => {
+    for (const invalid of ["", "0", "-1", "1.5", "abc"]) {
+      expect(
+        resolveEffectiveMaxConcurrentRuns({ maxConcurrentRuns: 4 }, { PAPERCLIP_MAX_CONCURRENT_RUNS: invalid }),
+      ).toBe(4);
+    }
+  });
+});
 
 describe("instance settings service", () => {
   it("keeps chat connectors opt-in across legacy storage and patches without disabling Apps", () => {

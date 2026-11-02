@@ -1873,7 +1873,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       ...fixture,
       previousRunId,
       action: action!,
-      heartbeat: heartbeatService(db, { runtimeEnv: {} }),
+      heartbeat: heartbeatService(db, { runtimeEnv: { PAPERCLIP_MAX_CONCURRENT_RUNS: process.env.PAPERCLIP_MAX_CONCURRENT_RUNS } }),
     };
   }
 

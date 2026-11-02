@@ -3761,7 +3761,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
     // Pin scheduling suppression off with the runtimeEnv test seam. Do not rely
     // on the ambient PAPERCLIP_IN_WORKTREE value: startNextQueuedRunForAgent
     // no-ops under suppression and would leave the promoted wake at "queued".
-    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    const heartbeat = heartbeatService(db, { runtimeEnv: { PAPERCLIP_MAX_CONCURRENT_RUNS: process.env.PAPERCLIP_MAX_CONCURRENT_RUNS } });
 
     await db.insert(companies).values({
       id: companyId,
@@ -3998,7 +3998,7 @@ describeEmbeddedPostgres("heartbeat comment wake batching", () => {
     // Pin scheduling suppression off with the runtimeEnv test seam. Do not rely
     // on the ambient PAPERCLIP_IN_WORKTREE value: startNextQueuedRunForAgent
     // no-ops under suppression and would leave the promoted wake at "queued".
-    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    const heartbeat = heartbeatService(db, { runtimeEnv: { PAPERCLIP_MAX_CONCURRENT_RUNS: process.env.PAPERCLIP_MAX_CONCURRENT_RUNS } });
 
     await db.insert(companies).values({
       id: companyId,

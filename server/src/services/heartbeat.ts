@@ -71,7 +71,7 @@ import {
 import { executionFailureRetryCount, executionRetryAttemptCount, accountingForScheduledRetry } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
-import { buildExecutionContinuation, StaleExecutionContinuationError } from "./execution-continuation.js";
+import { buildExecutionContinuation, resolveContinuationHistoryLimit, StaleExecutionContinuationError } from "./execution-continuation.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { PROJECT_REPOSITORIES_DIR, readGitWorkspaceSnapshot, disposeGitWorkspaceSnapshot } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { isWorkspaceGitScanError, WorkspaceGitScanError, WORKSPACE_GIT_SCAN_ERROR_CODES } from "./workspace-git-operation-scheduler.js";
@@ -393,11 +393,15 @@ import {
   type RunLivenessClassificationInput,
 } from "./run-liveness.js";
 import {
+  ISSUE_COMMENT_ADDED_ACTION,
   ISSUE_NEW_INPUT_ACTIVITY_ACTIONS,
   ISSUE_PROGRESS_ACTIVITY_ACTIONS,
   ISSUE_REWAKE_LOOKBACK_MS,
   ISSUE_REWAKE_RUN_SAMPLE_LIMIT,
+  countsAsIssueProgressActivity,
+  evaluateAgentWakeCooldown,
   evaluateIssueRewakeThrottle,
+  isAgentWakeCooldownCandidate,
   isThrottleCandidateIssueRewake,
 } from "./issue-rewake-throttle.js";
 import {
@@ -510,6 +514,7 @@ import {
 } from "./execution-workspace-policy.js";
 import {
   instanceSettingsService,
+  resolveEffectiveMaxConcurrentRuns,
   resolveWorktreeRunExecutionActivation,
 } from "./instance-settings.js";
 import {
@@ -559,7 +564,19 @@ import {
   isResolvedInteractionContinuationWakeContext,
 } from "../modules/run-dispatch/index.js";
 import {
+  admitWakeIntoBatch,
+  cancelBatchedWake,
+  claimBatchedWakes,
+  completeClaimedBatchedWakes,
+  createFlushDueWakeBatches,
   createWakeQueue,
+  decideBatchAdmission,
+  listAgentsWithBatchedWakes,
+  listBatchedWakes,
+  readBatchedWakeFacts,
+  releaseClaimedBatchedWakes,
+  type BatchedWake,
+  WAKE_BATCH_REASON,
   WakeQueueApplicationError,
   type IssueSnapshot as WakeQueueIssueSnapshot,
   type PostCommitEffect as WakeQueuePostCommitEffect,
@@ -577,6 +594,7 @@ import {
 import { resolveRequiredSuccessfulRunHandoffOnValidPath } from "./successful-run-handoff-state.js";
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
+import { withGlobalRunStartLock } from "./global-run-start-lock.js";
 import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
@@ -3795,6 +3813,10 @@ interface WakeupOptions {
   };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;
+  /** Internal replay of a flushed wake batch; never batched again. */
+  wakeBatchFlush?: boolean;
+  /** Internal promotion of a debounced comment wake; never set by route callers. */
+  bypassCommentDebounce?: boolean;
 }
 
 type UsageTotals = {
@@ -7323,6 +7345,73 @@ function isInteractionResolutionWakePayload(
   return readNonEmptyString(payload?.mutation) === "interaction";
 }
 
+export const COMMENT_DEBOUNCE_STATUS = "debounced_comment";
+const COMMENT_DEBOUNCE_PAYLOAD_KEY = "_paperclipCommentDebounce";
+const COMMENT_DEBOUNCE_DEFAULT_SEC = 120;
+const COMMENT_DEBOUNCE_DEFAULT_MAX_SEC = 300;
+const COMMENT_DEBOUNCE_TICK_BATCH = 100;
+const COMMENT_DEBOUNCE_ISSUE_PATH = sql.raw(`'{${COMMENT_DEBOUNCE_PAYLOAD_KEY},issueId}'`);
+const COMMENT_DEBOUNCE_DUE_PATH = sql.raw(`'{${COMMENT_DEBOUNCE_PAYLOAD_KEY},dueAt}'`);
+
+/**
+ * `runtimeConfig.heartbeat.commentDebounceSec` delays a plain comment wake so
+ * that comments posted close together reach the agent as one run. 0 disables
+ * it. `commentDebounceMaxSec` caps the sliding window from its first comment.
+ */
+export function parseCommentDebouncePolicy(heartbeat: Record<string, unknown>) {
+  const commentDebounceSec = Math.max(
+    0,
+    Math.floor(asNumber(heartbeat.commentDebounceSec, COMMENT_DEBOUNCE_DEFAULT_SEC)),
+  );
+  const commentDebounceMaxSec = Math.max(
+    commentDebounceSec,
+    Math.floor(asNumber(heartbeat.commentDebounceMaxSec, COMMENT_DEBOUNCE_DEFAULT_MAX_SEC)),
+  );
+  return { commentDebounceSec, commentDebounceMaxSec };
+}
+
+/**
+ * Only a plain comment from the issue thread is debounced. Interaction
+ * answers, resume/interrupt requests, review-path recovery and every internal
+ * delivery path keep their immediate wake.
+ */
+function isDebounceableCommentWake(opts: WakeupOptions, executionWaitRequestId?: string) {
+  const payload = opts.payload ?? {};
+  const context = opts.contextSnapshot ?? {};
+  return (
+    opts.reason === "issue_commented" &&
+    !opts.bypassCommentDebounce &&
+    // A flushed wake batch has already waited its window.
+    !opts.wakeBatchFlush &&
+    !executionWaitRequestId &&
+    readNonEmptyString(payload.mutation) === "comment" &&
+    readNonEmptyString(context.source) === "issue.comment" &&
+    Boolean(readNonEmptyString(payload.commentId) ?? readNonEmptyString(context.wakeCommentId)) &&
+    !opts.durableChatRequest &&
+    !opts.manualUserWake &&
+    !opts.failedRunId &&
+    !opts.queuedCommentRequestId &&
+    !opts.queuedCommentInterruptId &&
+    !opts.issueStateGuard &&
+    !opts.idempotencyKey &&
+    payload.resumeIntent !== true &&
+    context.resumeIntent !== true &&
+    !readNonEmptyString(payload.interruptedRunId) &&
+    !readNonEmptyString(context.interruptedRunId) &&
+    payload.reviewPathLost !== true &&
+    !isInteractionResolutionWakePayload(payload) &&
+    !hasInteractionContinuationWakeContext(context)
+  );
+}
+
+function readWakeIssueId(opts: WakeupOptions) {
+  return (
+    readNonEmptyString(opts.contextSnapshot?.issueId) ??
+    readNonEmptyString(opts.payload?.issueId) ??
+    readNonEmptyString(opts.payload?.taskId)
+  );
+}
+
 function clearInteractionContinuationWakeContext(
   contextSnapshot: Record<string, unknown>,
 ) {
@@ -7783,6 +7872,95 @@ export async function attestReviewedExternalChatRun(input: {
   throw new Error("reviewed_chat_execution_binding_not_ready");
 }
 
+// A batch run lists up to WAKE_BATCH_MAX_ISSUES_PER_RUN issues, so its new
+// comments share a larger body budget than one issue's wake.
+const MAX_BATCHED_WAKE_COMMENT_BODY_TOTAL_CHARS = 2 * MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS;
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+/** Builds the per-issue entries of a batch run's wake payload, with each issue's new comments inlined. */
+async function buildBatchedWakeEntries(input: {
+  db: Db;
+  companyId: string;
+  contextSnapshot: Record<string, unknown>;
+  exposeLowTrustRaw?: boolean;
+}) {
+  const raw = input.contextSnapshot.paperclipBatchedWakes;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const entries = raw.map((value) => parseObject(value)).filter((entry) => readNonEmptyString(entry.issueId));
+  const commentIds = [...new Set(entries.flatMap((entry) => readStringArray(entry.wakeCommentIds)))];
+  const commentRows = commentIds.length === 0
+    ? []
+    : await input.db
+        .select({
+          id: issueComments.id,
+          issueId: issueComments.issueId,
+          body: issueComments.body,
+          authorType: issueComments.authorType,
+          authorAgentId: issueComments.authorAgentId,
+          authorUserId: issueComments.authorUserId,
+          presentation: issueComments.presentation,
+          metadata: issueComments.metadata,
+          sourceTrust: issueComments.sourceTrust,
+          createdAt: issueComments.createdAt,
+          deletedAt: issueComments.deletedAt,
+        })
+        .from(issueComments)
+        .where(and(eq(issueComments.companyId, input.companyId), inArray(issueComments.id, commentIds)));
+  const commentsById = new Map(commentRows.map((row) => [row.id, row]));
+  const redaction = createRunSecretRedactionRegistry(input.db);
+  let remainingBodyChars = MAX_BATCHED_WAKE_COMMENT_BODY_TOTAL_CHARS;
+  const result: Array<Record<string, unknown>> = [];
+  for (const entry of entries) {
+    const issueId = String(entry.issueId);
+    const ids = readStringArray(entry.wakeCommentIds);
+    const comments: Array<Record<string, unknown>> = [];
+    let truncated = false;
+    for (const id of ids) {
+      const row = commentsById.get(id);
+      if (!row || row.issueId !== issueId || row.deletedAt) continue;
+      if (comments.length >= MAX_INLINE_WAKE_COMMENTS || remainingBodyChars <= 0) {
+        truncated = true;
+        break;
+      }
+      const safeRow = input.exposeLowTrustRaw ? row : sanitizeQuarantinedCommentForHigherTrust(row);
+      const allowed = Math.min(MAX_INLINE_WAKE_COMMENT_BODY_CHARS, remainingBodyChars);
+      const body = safeRow.body.length > allowed ? safeRow.body.slice(0, allowed) : safeRow.body;
+      const bodyTruncated = body.length < safeRow.body.length;
+      if (bodyTruncated) truncated = true;
+      remainingBodyChars -= body.length;
+      comments.push({
+        id: row.id,
+        issueId: row.issueId,
+        author: {
+          type: row.authorType ?? (row.authorAgentId ? "agent" : row.authorUserId ? "user" : "system"),
+          id: row.authorAgentId ?? row.authorUserId ?? null,
+        },
+        createdAt: row.createdAt.toISOString(),
+        body,
+        bodyTruncated,
+      });
+    }
+    result.push(await redaction.redactForIssue(input.companyId, issueId, {
+      issueId,
+      identifier: readNonEmptyString(entry.identifier),
+      title: readNonEmptyString(entry.title),
+      status: readNonEmptyString(entry.status),
+      priority: readNonEmptyString(entry.priority),
+      reason: readNonEmptyString(entry.reason),
+      reasons: readStringArray(entry.reasons),
+      interactionId: readNonEmptyString(entry.interactionId),
+      requestedByActorType: readNonEmptyString(entry.requestedByActorType),
+      commentIds: ids,
+      comments,
+      truncated,
+    }));
+  }
+  return result;
+}
+
 export async function buildPaperclipWakePayload(input: {
   db: Db;
   companyId: string;
@@ -7843,11 +8021,13 @@ export async function buildPaperclipWakePayload(input: {
           )
           .then((rows) => rows[0] ?? null)
       : null);
+  const batchedWakes = issueId ? [] : await buildBatchedWakeEntries(input);
   if (
     commentIds.length === 0 &&
     Object.keys(executionStage).length === 0 &&
     !issueSummary &&
-    !agentMessageText
+    !agentMessageText &&
+    batchedWakes.length === 0
   )
     return null;
 
@@ -8273,6 +8453,7 @@ export async function buildPaperclipWakePayload(input: {
       : [],
     childIssueSummaryTruncated:
       input.contextSnapshot.childIssueSummaryTruncated === true,
+    ...(batchedWakes.length > 0 ? { batchedWakes } : {}),
     dispositionRepair: input.contextSnapshot.legacyDispositionEpisode ? {
       attempt: input.contextSnapshot.dispositionRepairAttempt,
       maxAttempts: input.contextSnapshot.dispositionRepairMaxAttempts,
@@ -12267,6 +12448,7 @@ export function heartbeatService(
     // separate cache counter when the writer explicitly saved exclusive input.
     const latestRawInputTokens = (latestRawUsage?.inputTokens ?? 0) +
       (latestRun?.usageJson?.rawInputIncludesCached === false ? latestRawUsage?.cachedInputTokens ?? 0 : 0);
+    const latestContextTokens = asNumber(latestRun?.usageJson?.sessionContextTokens, 0);
     const sessionAgeHours =
       latestRun && oldestRun
         ? Math.max(
@@ -12288,6 +12470,13 @@ export function heartbeatService(
       reason =
         `session raw input reached ${formatCount(latestRawInputTokens)} tokens ` +
         `(threshold ${formatCount(policy.maxRawInputTokens)})`;
+    } else if (
+      (policy.maxSessionContextTokens ?? 0) > 0 &&
+      latestContextTokens >= policy.maxSessionContextTokens!
+    ) {
+      reason =
+        `session context reached ${formatCount(latestContextTokens)} tokens ` +
+        `(threshold ${formatCount(policy.maxSessionContextTokens!)})`;
     } else if (
       policy.maxSessionAgeHours > 0 &&
       sessionAgeHours >= policy.maxSessionAgeHours
@@ -16867,7 +17056,9 @@ export function heartbeatService(
     return {
       enabled: asBoolean(heartbeat.enabled, false),
       intervalSec: Math.max(0, asNumber(heartbeat.intervalSec, 0)),
+      cooldownSec: Math.max(0, asNumber(heartbeat.cooldownSec, 0)),
       wakeOnDemand: isHeartbeatWakeOnDemandEnabled(agent),
+      batchWindowSec: Math.max(0, asNumber(heartbeat.batchWindowSec, 0)),
       maxConcurrentRuns: normalizeMaxConcurrentRuns(
         heartbeat.maxConcurrentRuns,
       ),
@@ -16889,6 +17080,7 @@ export function heartbeatService(
           heartbeat.dailySpendCentsLimit ??
           heartbeat.dailyBudgetCents,
       ),
+      ...parseCommentDebouncePolicy(heartbeat),
     };
   }
 
@@ -17189,6 +17381,30 @@ export function heartbeatService(
         ),
       );
     return Number(count ?? 0);
+  }
+
+  // Instance-wide: every company and agent shares the host the runs execute on.
+  async function countRunningRunsGlobally() {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.status, "running"));
+    return Number(count ?? 0);
+  }
+
+  async function getInstanceMaxConcurrentRuns() {
+    return resolveEffectiveMaxConcurrentRuns(
+      await instanceSettings.getGeneral(),
+      runtimeEnv,
+    );
+  }
+
+  async function getGlobalAvailableRunSlots() {
+    const [runningCount, maxConcurrentRuns] = await Promise.all([
+      countRunningRunsGlobally(),
+      getInstanceMaxConcurrentRuns(),
+    ]);
+    return Math.max(0, maxConcurrentRuns - runningCount);
   }
 
   async function withChatControlRecoveryGate(
@@ -17689,89 +17905,173 @@ export function heartbeatService(
         issueId,
         stage: "claim",
       });
-    const queuedCommentClaim =
-      !nativeReviewContext && issueId && run.wakeupRequestId && queuedCommentIds.length > 0
-        ? await db
-            .transaction(async (tx) => {
-              // Match the queue-edit lock order: issue, wake, then run. Once the
-              // run becomes running, a concurrent discard must observe the
-              // claimed wake and return an explicit conflict; if discard wins,
-              // this claim observes the cancelled queue and does no work.
-              const issueClaim = await lockIssueExecutionClaim(tx as unknown as Db);
-              if (issueClaim.blocked) return { kind: "stale" as const, run: null };
-              const wake = await tx
-                .select()
-                .from(agentWakeupRequests)
-                .where(
-                  and(
-                    eq(agentWakeupRequests.id, run.wakeupRequestId!),
-                    eq(agentWakeupRequests.companyId, run.companyId),
-                    eq(agentWakeupRequests.agentId, run.agentId),
-                  ),
-                )
-                .for("update")
-                .limit(1)
-                .then((rows) => rows[0] ?? null);
-              const lockedRun = await tx
-                .select()
-                .from(heartbeatRuns)
-                .where(
-                  and(
-                    eq(heartbeatRuns.id, run.id),
-                    eq(heartbeatRuns.companyId, run.companyId),
-                    eq(heartbeatRuns.agentId, run.agentId),
-                  ),
-                )
-                .for("update")
-                .limit(1)
-                .then((rows) => rows[0] ?? null);
-              if (
-                !wake ||
-                wake.status !== "queued" ||
-                wake.runId !== run.id ||
-                !lockedRun ||
-                lockedRun.status !== "queued" ||
-                lockedRun.wakeupRequestId !== wake.id
-              ) {
-                return { kind: "stale" as const, run: null };
-              }
+    // Instance-wide concurrent-run cap. Count and transition run under one
+    // process-wide lock so two agents cannot both take the last slot. A run
+    // refused here is left untouched in `queued`; startNextQueuedRunsGlobally
+    // promotes it when a slot frees up (or on restart via resumeQueuedRuns).
+    const lockedClaim = await withGlobalRunStartLock(async () => {
+      const [runningCount, maxConcurrentRuns] = await Promise.all([
+        countRunningRunsGlobally(),
+        getInstanceMaxConcurrentRuns(),
+      ]);
+      if (runningCount >= maxConcurrentRuns) {
+        logger.info(
+          { runId: run.id, agentId: run.agentId, runningCount, maxConcurrentRuns },
+          "claimQueuedRun: instance concurrent-run cap reached; run stays queued",
+        );
+        return null;
+      }
+      const queuedCommentClaim =
+        !nativeReviewContext && issueId && run.wakeupRequestId && queuedCommentIds.length > 0
+          ? await db
+              .transaction(async (tx) => {
+                // Match the queue-edit lock order: issue, wake, then run. Once the
+                // run becomes running, a concurrent discard must observe the
+                // claimed wake and return an explicit conflict; if discard wins,
+                // this claim observes the cancelled queue and does no work.
+                const issueClaim = await lockIssueExecutionClaim(tx as unknown as Db);
+                if (issueClaim.blocked) return { kind: "stale" as const, run: null };
+                const wake = await tx
+                  .select()
+                  .from(agentWakeupRequests)
+                  .where(
+                    and(
+                      eq(agentWakeupRequests.id, run.wakeupRequestId!),
+                      eq(agentWakeupRequests.companyId, run.companyId),
+                      eq(agentWakeupRequests.agentId, run.agentId),
+                    ),
+                  )
+                  .for("update")
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null);
+                const lockedRun = await tx
+                  .select()
+                  .from(heartbeatRuns)
+                  .where(
+                    and(
+                      eq(heartbeatRuns.id, run.id),
+                      eq(heartbeatRuns.companyId, run.companyId),
+                      eq(heartbeatRuns.agentId, run.agentId),
+                    ),
+                  )
+                  .for("update")
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null);
+                if (
+                  !wake ||
+                  wake.status !== "queued" ||
+                  wake.runId !== run.id ||
+                  !lockedRun ||
+                  lockedRun.status !== "queued" ||
+                  lockedRun.wakeupRequestId !== wake.id
+                ) {
+                  return { kind: "stale" as const, run: null };
+                }
 
-              if (lockedRun.invocationSource === "automation") {
-                const admission = readChatControlRecoveryAdmission(lockedRun);
-                if (admission === "invalid")
-                  return { kind: "stale" as const, run: null };
-                const proof = await readChatControlRecoveryStop(
-                  tx as unknown as Db,
-                  {
-                    companyId: lockedRun.companyId,
-                    issueId,
-                    agentId: lockedRun.agentId,
-                    sourceRunId: lockedRun.id,
-                  },
-                  true,
-                );
-                if (proof.kind === "unresolved")
-                  return { kind: "stale" as const, run: null };
-                if (proof.kind === "stopped") {
-                  const error =
-                    "Automatic continuation stopped by the committed chat conversation close. Send a fresh request in chat or on the Board.";
-                  const [cancelled] = await tx
+                if (lockedRun.invocationSource === "automation") {
+                  const admission = readChatControlRecoveryAdmission(lockedRun);
+                  if (admission === "invalid")
+                    return { kind: "stale" as const, run: null };
+                  const proof = await readChatControlRecoveryStop(
+                    tx as unknown as Db,
+                    {
+                      companyId: lockedRun.companyId,
+                      issueId,
+                      agentId: lockedRun.agentId,
+                      sourceRunId: lockedRun.id,
+                    },
+                    true,
+                  );
+                  if (proof.kind === "unresolved")
+                    return { kind: "stale" as const, run: null };
+                  if (proof.kind === "stopped") {
+                    const error =
+                      "Automatic continuation stopped by the committed chat conversation close. Send a fresh request in chat or on the Board.";
+                    const [cancelled] = await tx
+                      .update(heartbeatRuns)
+                      .set({
+                        status: "cancelled",
+                        errorCode: CHAT_CONTROL_RECOVERY_STOP_CODE,
+                        error,
+                        finishedAt: claimedAt,
+                        resultJson: {
+                          ...parseObject(lockedRun.resultJson),
+                          automaticRecovery: {
+                            code: CHAT_CONTROL_RECOVERY_STOP_CODE,
+                            providerDispatched: false,
+                            sourceRunId: proof.sourceRunId,
+                            conversationId: proof.conversationId,
+                            publicationId: proof.publicationId,
+                          },
+                        },
+                        updatedAt: claimedAt,
+                      })
+                      .where(
+                        and(
+                          eq(heartbeatRuns.id, lockedRun.id),
+                          eq(heartbeatRuns.status, "queued"),
+                        ),
+                      )
+                      .returning();
+                    if (!cancelled) return { kind: "stale" as const, run: null };
+                    await tx
+                      .update(agentWakeupRequests)
+                      .set({
+                        status: "skipped",
+                        error,
+                        finishedAt: claimedAt,
+                        updatedAt: claimedAt,
+                      })
+                      .where(eq(agentWakeupRequests.id, wake.id));
+                    await tx
+                      .update(issues)
+                      .set({
+                        executionRunId: null,
+                        executionAgentNameKey: null,
+                        executionLockedAt: null,
+                        updatedAt: claimedAt,
+                      })
+                      .where(
+                        and(
+                          eq(issues.id, issueId),
+                          eq(issues.companyId, run.companyId),
+                          eq(issues.executionRunId, run.id),
+                        ),
+                      );
+                    return { kind: "cancelled" as const, run: cancelled };
+                  }
+                  await tx
                     .update(heartbeatRuns)
                     .set({
-                      status: "cancelled",
-                      errorCode: CHAT_CONTROL_RECOVERY_STOP_CODE,
-                      error,
-                      finishedAt: claimedAt,
-                      resultJson: {
-                        ...parseObject(lockedRun.resultJson),
-                        automaticRecovery: {
-                          code: CHAT_CONTROL_RECOVERY_STOP_CODE,
-                          providerDispatched: false,
-                          sourceRunId: proof.sourceRunId,
-                          conversationId: proof.conversationId,
-                          publicationId: proof.publicationId,
-                        },
+                      runnerProfileJson: {
+                        ...parseObject(lockedRun.runnerProfileJson),
+                        [CHAT_CONTROL_RECOVERY_ADMISSION_KEY]:
+                          chatControlRecoveryAdmission(
+                            lockedRun,
+                            admission === "admitted" ? "admitted" : "required",
+                          ),
                       },
+                      updatedAt: claimedAt,
+                    })
+                    .where(eq(heartbeatRuns.id, lockedRun.id));
+                }
+                const authoritativeIds = queuedCommentIdsFromWakePayload(
+                  wake.payload,
+                );
+                if (authoritativeIds.length === 0) {
+                  // Legacy/direct comment wakes carry comment ids in their ordinary
+                  // payload and context, not in the authoritative queued-message
+                  // envelope. Preserve their established claim path; only an
+                  // explicitly bound queued-message envelope is subject to the
+                  // live-comment discard gate below.
+                  const [claimedRun] = await tx
+                    .update(heartbeatRuns)
+                    .set({
+                      status: "running",
+                      runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                      ...legacyControllerClaim(run.runtimeMode),
+                      responsibleUserId,
+                      startedAt: lockedRun.startedAt ?? claimedAt,
                       updatedAt: claimedAt,
                     })
                     .where(
@@ -17781,13 +18081,52 @@ export function heartbeatService(
                       ),
                     )
                     .returning();
-                  if (!cancelled) return { kind: "stale" as const, run: null };
+                  await bindClaimedIssueExecution(tx as unknown as Db, issueClaim.ownsIssue, claimedRun);
+                  return claimedRun
+                    ? { kind: "claimed" as const, run: claimedRun }
+                    : { kind: "stale" as const, run: null };
+                }
+                const commentRows = await tx
+                  .select({
+                    id: issueComments.id,
+                    deletedAt: issueComments.deletedAt,
+                  })
+                  .from(issueComments)
+                  .where(
+                    and(
+                      eq(issueComments.companyId, run.companyId),
+                      eq(issueComments.issueId, issueId),
+                      inArray(issueComments.id, authoritativeIds),
+                    ),
+                  );
+                const liveIds = authoritativeIds.filter((commentId) => {
+                  const comment = commentRows.find((row) => row.id === commentId);
+                  return Boolean(comment && !comment.deletedAt);
+                });
+                if (liveIds.length === 0) {
+                  const reason = "Queued messages were discarded before dispatch";
+                  const [cancelled] = await tx
+                    .update(heartbeatRuns)
+                    .set({
+                      status: "cancelled",
+                      finishedAt: claimedAt,
+                      error: reason,
+                      errorCode: "queued_comment_discarded",
+                      updatedAt: claimedAt,
+                    })
+                    .where(
+                      and(
+                        eq(heartbeatRuns.id, lockedRun.id),
+                        eq(heartbeatRuns.status, "queued"),
+                      ),
+                    )
+                    .returning();
                   await tx
                     .update(agentWakeupRequests)
                     .set({
-                      status: "skipped",
-                      error,
+                      status: "cancelled",
                       finishedAt: claimedAt,
+                      error: reason,
                       updatedAt: claimedAt,
                     })
                     .where(eq(agentWakeupRequests.id, wake.id));
@@ -17806,40 +18145,36 @@ export function heartbeatService(
                         eq(issues.executionRunId, run.id),
                       ),
                     );
-                  return { kind: "cancelled" as const, run: cancelled };
+                  return {
+                    kind: "cancelled" as const,
+                    run: cancelled ?? lockedRun,
+                  };
                 }
+
                 await tx
-                  .update(heartbeatRuns)
+                  .update(agentWakeupRequests)
                   .set({
-                    runnerProfileJson: {
-                      ...parseObject(lockedRun.runnerProfileJson),
-                      [CHAT_CONTROL_RECOVERY_ADMISSION_KEY]:
-                        chatControlRecoveryAdmission(
-                          lockedRun,
-                          admission === "admitted" ? "admitted" : "required",
-                        ),
-                    },
+                    status: "claimed",
+                    claimedAt,
+                    payload: withQueuedCommentIdsInWakePayload(
+                      wake.payload,
+                      liveIds,
+                    ),
                     updatedAt: claimedAt,
                   })
-                  .where(eq(heartbeatRuns.id, lockedRun.id));
-              }
-              const authoritativeIds = queuedCommentIdsFromWakePayload(
-                wake.payload,
-              );
-              if (authoritativeIds.length === 0) {
-                // Legacy/direct comment wakes carry comment ids in their ordinary
-                // payload and context, not in the authoritative queued-message
-                // envelope. Preserve their established claim path; only an
-                // explicitly bound queued-message envelope is subject to the
-                // live-comment discard gate below.
+                  .where(eq(agentWakeupRequests.id, wake.id));
                 const [claimedRun] = await tx
                   .update(heartbeatRuns)
                   .set({
                     status: "running",
                     runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
-                    ...legacyControllerClaim(run.runtimeMode),
+                      ...legacyControllerClaim(run.runtimeMode),
                     responsibleUserId,
                     startedAt: lockedRun.startedAt ?? claimedAt,
+                    contextSnapshot: withQueuedCommentIdsInRunContext(
+                      lockedRun.contextSnapshot,
+                      liveIds,
+                    ),
                     updatedAt: claimedAt,
                   })
                   .where(
@@ -17853,181 +18188,83 @@ export function heartbeatService(
                 return claimedRun
                   ? { kind: "claimed" as const, run: claimedRun }
                   : { kind: "stale" as const, run: null };
-              }
-              const commentRows = await tx
-                .select({
-                  id: issueComments.id,
-                  deletedAt: issueComments.deletedAt,
-                })
-                .from(issueComments)
-                .where(
-                  and(
-                    eq(issueComments.companyId, run.companyId),
-                    eq(issueComments.issueId, issueId),
-                    inArray(issueComments.id, authoritativeIds),
-                  ),
-                );
-              const liveIds = authoritativeIds.filter((commentId) => {
-                const comment = commentRows.find((row) => row.id === commentId);
-                return Boolean(comment && !comment.deletedAt);
-              });
-              if (liveIds.length === 0) {
-                const reason = "Queued messages were discarded before dispatch";
-                const [cancelled] = await tx
-                  .update(heartbeatRuns)
-                  .set({
-                    status: "cancelled",
-                    finishedAt: claimedAt,
-                    error: reason,
-                    errorCode: "queued_comment_discarded",
-                    updatedAt: claimedAt,
-                  })
-                  .where(
-                    and(
-                      eq(heartbeatRuns.id, lockedRun.id),
-                      eq(heartbeatRuns.status, "queued"),
-                    ),
-                  )
-                  .returning();
-                await tx
-                  .update(agentWakeupRequests)
-                  .set({
-                    status: "cancelled",
-                    finishedAt: claimedAt,
-                    error: reason,
-                    updatedAt: claimedAt,
-                  })
-                  .where(eq(agentWakeupRequests.id, wake.id));
-                await tx
-                  .update(issues)
-                  .set({
-                    executionRunId: null,
-                    executionAgentNameKey: null,
-                    executionLockedAt: null,
-                    updatedAt: claimedAt,
-                  })
-                  .where(
-                    and(
-                      eq(issues.id, issueId),
-                      eq(issues.companyId, run.companyId),
-                      eq(issues.executionRunId, run.id),
-                    ),
-                  );
-                return {
-                  kind: "cancelled" as const,
-                  run: cancelled ?? lockedRun,
-                };
-              }
-
-              await tx
-                .update(agentWakeupRequests)
-                .set({
-                  status: "claimed",
-                  claimedAt,
-                  payload: withQueuedCommentIdsInWakePayload(
-                    wake.payload,
-                    liveIds,
-                  ),
-                  updatedAt: claimedAt,
-                })
-                .where(eq(agentWakeupRequests.id, wake.id));
-              const [claimedRun] = await tx
-                .update(heartbeatRuns)
-                .set({
-                  status: "running",
-                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
-                    ...legacyControllerClaim(run.runtimeMode),
-                  responsibleUserId,
-                  startedAt: lockedRun.startedAt ?? claimedAt,
-                  contextSnapshot: withQueuedCommentIdsInRunContext(
-                    lockedRun.contextSnapshot,
-                    liveIds,
-                  ),
-                  updatedAt: claimedAt,
-                })
-                .where(
-                  and(
-                    eq(heartbeatRuns.id, lockedRun.id),
-                    eq(heartbeatRuns.status, "queued"),
-                  ),
-                )
-                .returning();
-              await bindClaimedIssueExecution(tx as unknown as Db, issueClaim.ownsIssue, claimedRun);
-              return claimedRun
-                ? { kind: "claimed" as const, run: claimedRun }
-                : { kind: "stale" as const, run: null };
-            })
-            .catch((error) => {
-              if (isExternalChatWaitAuthorizationContention(error))
-                return { kind: "stale" as const, run: null };
-              throw error;
-            })
-        : null;
-    if (queuedCommentClaim?.kind === "cancelled") {
-      await appendRunEvent(queuedCommentClaim.run, {
+              })
+              .catch((error) => {
+                if (isExternalChatWaitAuthorizationContention(error))
+                  return { kind: "stale" as const, run: null };
+                throw error;
+              })
+          : null;
+      if (queuedCommentClaim) return queuedCommentClaim;
+      const claimedRun = await withChatControlRecoveryGate(run, "claim", async (tx) => {
+        const claimValues = {
+          status: "running",
+          runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+          ...legacyControllerClaim(run.runtimeMode),
+          responsibleUserId,
+          startedAt: run.startedAt ?? claimedAt,
+          updatedAt: claimedAt,
+        };
+        if (nativeReviewContext) {
+          if (run.scheduledRetryReason === "native_provider_overloaded") {
+            const predecessor = await lockIssueExecutionClaim(tx);
+            if (predecessor.blocked) return null;
+          }
+          return claimQueuedNativeReviewRun(tx, {
+            run, claimedAt, claimValues,
+            agentNameKey: normalizeAgentNameKey(agent.name),
+          });
+        }
+        return tx.transaction(async (claimTx) => {
+          const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
+          if (issueClaim.blocked) return null;
+          const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
+            eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued"),
+          )).returning().then((rows) => rows[0] ?? null);
+          await bindClaimedIssueExecution(claimTx as unknown as Db, issueClaim.ownsIssue, claimedRun);
+          return claimedRun;
+        });
+      });
+      return claimedRun
+        ? { kind: "claimed" as const, run: claimedRun }
+        : { kind: "stale" as const, run: null };
+    });
+    if (!lockedClaim) return null;
+    if (lockedClaim.kind === "cancelled") {
+      await appendRunEvent(lockedClaim.run, {
         eventType: "lifecycle",
         stream: "system",
         level: "warn",
         message:
-          queuedCommentClaim.run.error ??
+          lockedClaim.run.error ??
           "Queued messages were discarded before dispatch",
       });
       publishLiveEvent({
-        companyId: queuedCommentClaim.run.companyId,
+        companyId: lockedClaim.run.companyId,
         type: "heartbeat.run.status",
         payload: {
-          runId: queuedCommentClaim.run.id,
-          agentId: queuedCommentClaim.run.agentId,
-          status: queuedCommentClaim.run.status,
-          invocationSource: queuedCommentClaim.run.invocationSource,
-          triggerDetail: queuedCommentClaim.run.triggerDetail,
-          error: queuedCommentClaim.run.error ?? null,
-          errorCode: queuedCommentClaim.run.errorCode ?? null,
-          startedAt: queuedCommentClaim.run.startedAt
-            ? new Date(queuedCommentClaim.run.startedAt).toISOString()
+          runId: lockedClaim.run.id,
+          agentId: lockedClaim.run.agentId,
+          status: lockedClaim.run.status,
+          invocationSource: lockedClaim.run.invocationSource,
+          triggerDetail: lockedClaim.run.triggerDetail,
+          error: lockedClaim.run.error ?? null,
+          errorCode: lockedClaim.run.errorCode ?? null,
+          startedAt: lockedClaim.run.startedAt
+            ? new Date(lockedClaim.run.startedAt).toISOString()
             : null,
-          finishedAt: queuedCommentClaim.run.finishedAt
-            ? new Date(queuedCommentClaim.run.finishedAt).toISOString()
+          finishedAt: lockedClaim.run.finishedAt
+            ? new Date(lockedClaim.run.finishedAt).toISOString()
             : null,
         },
       });
-      publishRunLifecyclePluginEvent(queuedCommentClaim.run);
+      publishRunLifecyclePluginEvent(lockedClaim.run);
       // Fire-and-forget: nothing else in this path depends on the emission,
       // so it must not delay the return.
-      void emitAgentTaskRun(db, queuedCommentClaim.run);
+      void emitAgentTaskRun(db, lockedClaim.run);
       return null;
     }
-    const claimed = queuedCommentClaim
-      ? queuedCommentClaim.run
-      : await withChatControlRecoveryGate(run, "claim", async (tx) => {
-          const claimValues = {
-            status: "running",
-            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
-            ...legacyControllerClaim(run.runtimeMode),
-            responsibleUserId,
-            startedAt: run.startedAt ?? claimedAt,
-            updatedAt: claimedAt,
-          };
-          if (nativeReviewContext) {
-            if (run.scheduledRetryReason === "native_provider_overloaded") {
-              const predecessor = await lockIssueExecutionClaim(tx);
-              if (predecessor.blocked) return null;
-            }
-            return claimQueuedNativeReviewRun(tx, {
-              run, claimedAt, claimValues,
-              agentNameKey: normalizeAgentNameKey(agent.name),
-            });
-          }
-          return tx.transaction(async (claimTx) => {
-            const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
-            if (issueClaim.blocked) return null;
-            const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
-              eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued"),
-            )).returning().then((rows) => rows[0] ?? null);
-            await bindClaimedIssueExecution(claimTx as unknown as Db, issueClaim.ownsIssue, claimedRun);
-            return claimedRun;
-          });
-        });
+    const claimed = lockedClaim.run;
     if (!claimed) return null;
 
     publishLiveEvent({
@@ -18296,6 +18533,16 @@ export function heartbeatService(
           outcome,
         },
       });
+    }
+
+    // A finished run may be what a pending wake batch was waiting for. Fire
+    // and forget like trackWakeup, so a shutdown drain still awaits it.
+    if (runningCount === 0) {
+      const flush = flushDueWakeBatches({ agentId }).catch((err) => {
+        logger.warn({ err, agentId }, "failed to flush wake batch after run");
+      });
+      activeWakeupPromises.add(flush);
+      void flush.finally(() => activeWakeupPromises.delete(flush));
     }
   }
 
@@ -19635,7 +19882,7 @@ export function heartbeatService(
       await finalizeAgentStatus(run.agentId, "failed", baseMessage, {
         wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
       });
-      await startNextQueuedRunForAgent(run.agentId);
+      await startNextQueuedRunsGlobally();
       runningProcesses.delete(run.id);
       reaped.push(run.id);
     }
@@ -19696,6 +19943,90 @@ export function heartbeatService(
     }
 
     return { reaped: reaped.length, runIds: reaped };
+  }
+
+  // Per-agent wake batch window (`runtimeConfig.heartbeat.batchWindowSec`).
+  // Both delivery paths re-enter enqueueWakeup with `wakeBatchFlush`, so a
+  // flushed wake meets every gate a fresh wake meets and is never re-batched.
+  const flushWakeBatches = createFlushDueWakeBatches<BatchedWake>({
+    now: () => new Date(),
+    listPendingAgents: (agentId) => listAgentsWithBatchedWakes(db, agentId),
+    readAgentBatchState: async (agentId) => {
+      const agent = await getAgent(agentId);
+      if (!agent) return { kind: "missing" };
+      if (!(await getAgentInvokability(agent)).invokable) return { kind: "held" };
+      if (await budgets.getInvocationBlock(agent.companyId, agentId, {})) return { kind: "held" };
+      const [active] = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.agentId, agentId),
+          inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+        ))
+        .limit(1);
+      return {
+        kind: "ready",
+        batchWindowSec: parseHeartbeatPolicy(agent).batchWindowSec,
+        agentHasActiveRun: Boolean(active),
+      };
+    },
+    listBatchedWakes: (agentId) => listBatchedWakes(db, agentId),
+    readRevalidationFacts: async (wakes) => (await readBatchedWakeFacts(db, wakes)).facts,
+    cancel: (wake, reason) => cancelBatchedWake(db, wake.id, reason),
+    claim: (wakes) => claimBatchedWakes(db, wakes.map((wake) => wake.id)),
+    release: (wakes) => releaseClaimedBatchedWakes(db, wakes),
+    complete: (wakes, runId) => completeClaimedBatchedWakes(db, wakes, runId),
+    deliverSingle: async (wake) => {
+      const run = await enqueueWakeup(wake.agentId, {
+        source: wake.source as WakeupOptions["source"],
+        triggerDetail: (wake.triggerDetail ?? undefined) as WakeupOptions["triggerDetail"],
+        reason: wake.reason,
+        payload: wake.payload,
+        contextSnapshot: wake.contextSnapshot,
+        requestedByActorType: (wake.requestedByActorType ?? undefined) as WakeupOptions["requestedByActorType"],
+        requestedByActorId: wake.requestedByActorId,
+        idempotencyKey: wake.meta.idempotencyKey,
+        wakeBatchFlush: true,
+      });
+      return { runId: run?.id ?? null };
+    },
+    deliverBatch: async (agentId, wakes) => {
+      const { issuesById } = await readBatchedWakeFacts(db, wakes);
+      const batchedWakes = wakes.map((wake) => {
+        const issue = issuesById.get(wake.issueId);
+        return {
+          wakeupRequestId: wake.id,
+          issueId: wake.issueId,
+          identifier: issue?.identifier ?? null,
+          title: issue?.title ?? null,
+          status: issue?.status ?? null,
+          priority: issue?.priority ?? null,
+          reason: readNonEmptyString(wake.contextSnapshot.wakeReason) ?? wake.reason,
+          reasons: wake.meta.reasons,
+          wakeCommentIds: queuedCommentIdsFromWakePayload(wake.payload),
+          interactionId: readNonEmptyString(wake.contextSnapshot.interactionId),
+          requestedByActorType: wake.requestedByActorType,
+        };
+      });
+      const run = await enqueueWakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: WAKE_BATCH_REASON,
+        payload: { wakeBatchRequestIds: wakes.map((wake) => wake.id) },
+        contextSnapshot: { wakeReason: WAKE_BATCH_REASON, paperclipBatchedWakes: batchedWakes },
+        requestedByActorType: "system",
+        requestedByActorId: "wake-batch",
+        allowRunCoalescing: false,
+        wakeBatchFlush: true,
+      });
+      return { runId: run?.id ?? null };
+    },
+    onError: (agentId, err) => logger.warn({ err, agentId }, "failed to flush wake batch"),
+  });
+
+  async function flushDueWakeBatches(opts: { agentId?: string } = {}) {
+    if ((await getSchedulingSuppression()).suppressed) return [];
+    return flushWakeBatches(opts);
   }
 
   async function resumeQueuedRuns() {
@@ -19784,22 +20115,15 @@ export function heartbeatService(
       });
     }
 
-    const queuedRuns = await db
-      .select({ agentId: heartbeatRuns.agentId })
-      .from(heartbeatRuns)
-      .innerJoin(companies, eq(companies.id, heartbeatRuns.companyId))
-      .where(
-        and(
-          eq(heartbeatRuns.status, "queued"),
-          eq(companies.status, "active"),
-          cutoff ? gte(heartbeatRuns.createdAt, cutoff) : undefined,
-        ),
-      );
-
-    const agentIds = [...new Set(queuedRuns.map((r) => r.agentId))];
-    for (const agentId of agentIds) {
+    // Fill free instance slots oldest-first, then visit every agent with
+    // queued runs so per-agent housekeeping (non-invokable cancellation) still
+    // runs when the instance cap is already reached.
+    await startNextQueuedRunsGlobally();
+    for (const agentId of await listAgentIdsWithQueuedRunsOldestFirst(cutoff)) {
       await startNextQueuedRunForAgent(agentId);
     }
+    // The scheduler tick drives due wake batches through the same sweep.
+    await flushWakeBatches();
   }
 
   async function recoverActiveSessionGoals() {
@@ -20097,7 +20421,70 @@ export function heartbeatService(
     }
   }
 
-  async function startNextQueuedRunForAgent(agentId: string) {
+  // Agents with queued runs, ordered by their oldest queued run (FIFO across
+  // agents). Within an agent, startNextQueuedRunForAgent keeps its own
+  // priority order.
+  async function listAgentIdsWithQueuedRunsOldestFirst(cutoff: Date | null) {
+    const oldestQueuedAt = sql`min(${heartbeatRuns.createdAt})`;
+    const rows = await db
+      .select({ agentId: heartbeatRuns.agentId })
+      .from(heartbeatRuns)
+      .innerJoin(companies, eq(companies.id, heartbeatRuns.companyId))
+      .where(
+        and(
+          eq(heartbeatRuns.status, "queued"),
+          eq(companies.status, "active"),
+          cutoff ? gte(heartbeatRuns.createdAt, cutoff) : undefined,
+        ),
+      )
+      .groupBy(heartbeatRuns.agentId)
+      .orderBy(asc(oldestQueuedAt), asc(heartbeatRuns.agentId));
+    return rows.map((row) => row.agentId);
+  }
+
+  // Hand free instance slots to queued runs across all agents, one claim at a
+  // time, always to the agent whose queued run is oldest. A finished run's slot
+  // therefore goes to the oldest queued run in the instance, not to the agent
+  // that just finished. Agents that cannot start anything (per-agent cap,
+  // blocked dependencies, not invokable) are skipped for the next one.
+  async function startNextQueuedRunsGlobally() {
+    if ((await getSchedulingSuppression()).suppressed) return [];
+    const cutoff = await getWorktreeExecutionCutoff();
+    const started: Array<typeof heartbeatRuns.$inferSelect> = [];
+    while ((await getGlobalAvailableRunSlots()) > 0) {
+      let claimedThisPass = false;
+      for (const agentId of await listAgentIdsWithQueuedRunsOldestFirst(cutoff)) {
+        const claimed = await startNextQueuedRunForAgent(agentId, { maxClaims: 1 });
+        if (claimed.length > 0) {
+          started.push(...claimed);
+          claimedThisPass = true;
+          break;
+        }
+      }
+      if (!claimedThisPass) break;
+    }
+    return started;
+  }
+
+  // Detached variant for paths that may run under an agent start lock (run
+  // cancellation): awaiting the promotion there could wait on another agent's
+  // lock. Tracked so drainActiveRunExecutions still waits for it.
+  function scheduleGlobalQueuedRunPromotion() {
+    const promotion = startNextQueuedRunsGlobally()
+      .then(() => undefined)
+      .catch((err) => {
+        logger.error({ err }, "failed to promote queued heartbeat runs after a slot freed up");
+      });
+    activeRunExecutionPromises.add(promotion);
+    void promotion.finally(() => {
+      activeRunExecutionPromises.delete(promotion);
+    });
+  }
+
+  async function startNextQueuedRunForAgent(
+    agentId: string,
+    startOptions: { maxClaims?: number } = {},
+  ) {
     if ((await getSchedulingSuppression()).suppressed) return [];
     const cutoff = await getWorktreeExecutionCutoff();
     // Cancelled after the start lock is released: cancelRunInternal promotes the
@@ -20119,9 +20506,12 @@ export function heartbeatService(
       }
       const policy = parseHeartbeatPolicy(agent);
       const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(
-        0,
-        policy.maxConcurrentRuns - runningCount,
+      // The instance cap is re-checked atomically in claimQueuedRun; this only
+      // avoids claiming work that cannot start.
+      const availableSlots = Math.min(
+        Math.max(0, policy.maxConcurrentRuns - runningCount),
+        await getGlobalAvailableRunSlots(),
+        startOptions.maxClaims ?? Number.POSITIVE_INFINITY,
       );
       if (availableSlots <= 0) return [];
 
@@ -21149,6 +21539,7 @@ export function heartbeatService(
               previousContextRunId: taskSession?.lastRunId,
               summary: safeContinuationSummary?.body ?? null,
               exposeLowTrustRaw,
+              maxHistoryComments: resolveContinuationHistoryLimit(agent.runtimeConfig),
             })
           : null;
       context.executionContinuation = executionContinuation;
@@ -25667,6 +26058,11 @@ export function heartbeatService(
                 rawOutputTokens: rawUsage.outputTokens,
               }
             : {}),
+          ...(typeof adapterResult.sessionContextTokens === "number" &&
+          Number.isFinite(adapterResult.sessionContextTokens) &&
+          adapterResult.sessionContextTokens >= 0
+            ? { sessionContextTokens: Math.floor(adapterResult.sessionContextTokens) }
+            : {}),
           ...(sessionUsageResolution.derivedFromSessionTotals
             ? { usageSource: "session_delta" }
             : adapterResult.usageBasis === "per_run"
@@ -27012,7 +27408,9 @@ export function heartbeatService(
               logger.warn({ err, runId: run.id }, "failed to deliver settled tool reviews after execution cleanup");
             });
         }
-        await startNextQueuedRunForAgent(run.agentId);
+        // The finished run freed an instance slot: give it to the oldest
+        // queued run of any agent (this agent included).
+        await startNextQueuedRunsGlobally();
       }
     }
   }
@@ -27054,6 +27452,262 @@ export function heartbeatService(
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string) {
+    if (isDebounceableCommentWake(opts, executionWaitRequestId)) {
+      if (await debounceCommentWake(agentId, opts)) return null;
+    }
+    const run = await enqueueWakeupNow(agentId, opts, executionWaitRequestId);
+    const issueId = readWakeIssueId(opts);
+    if (!opts.bypassCommentDebounce && issueId && isUuidLike(issueId)) {
+      // The immediate wake keeps its place; held comments follow it through the
+      // normal queue (coalesced into its run or deferred behind it).
+      await flushDebouncedCommentWakes(agentId, issueId).catch((err) =>
+        logger.warn({ err, agentId, issueId }, "failed to flush debounced comment wakes"),
+      );
+    }
+    return run;
+  }
+
+  /**
+   * Hold a plain comment wake for `commentDebounceSec` when the agent is not
+   * already working on the issue. Later comments on the same issue extend one
+   * persisted request (sliding window, capped by `commentDebounceMaxSec`), so a
+   * restart keeps the held wake; `tickTimers` promotes it once due.
+   * Returns false when the wake must go through the normal path.
+   */
+  async function debounceCommentWake(agentId: string, opts: WakeupOptions) {
+    const issueId = readWakeIssueId(opts);
+    if (!issueId || !isUuidLike(issueId)) return false;
+    const agent = await getAgent(agentId);
+    if (!agent) return false;
+    const { commentDebounceSec, commentDebounceMaxSec, batchWindowSec } = parseHeartbeatPolicy(agent);
+    if (commentDebounceSec <= 0) return false;
+
+    const issue = await db
+      .select({ id: issues.id, executionRunId: issues.executionRunId, priority: issues.priority })
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (!issue || issue.executionRunId) return false;
+    if (isConversation(await getIssueExecutionContext(agent.companyId, issueId))) return false;
+    // A wake the agent's batch window will admit already merges with the other
+    // wakes of its issue there; holding it here too would make it wait twice.
+    const batchAdmission = decideBatchAdmission({
+      batchWindowSec,
+      source: opts.source ?? "on_demand",
+      hasIssue: true,
+      activeExecutionRunPresent: false,
+      requestedByActorType: opts.requestedByActorType ?? null,
+      issuePriority: issue.priority,
+      requiresDedicatedRun: false,
+    });
+    if (batchAdmission.kind === "batch") return false;
+    const activeRun = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, agent.companyId),
+        eq(heartbeatRuns.agentId, agentId),
+        inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (activeRun) return false;
+
+    const commentId =
+      readNonEmptyString(opts.payload?.commentId) ??
+      readNonEmptyString(opts.contextSnapshot?.wakeCommentId);
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`);
+      const existing = await tx
+        .select()
+        .from(agentWakeupRequests)
+        .where(and(
+          eq(agentWakeupRequests.companyId, agent.companyId),
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+          sql`${agentWakeupRequests.payload} #>> ${COMMENT_DEBOUNCE_ISSUE_PATH} = ${issueId}`,
+        ))
+        .orderBy(asc(agentWakeupRequests.requestedAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      const previous = parseObject(existing?.payload?.[COMMENT_DEBOUNCE_PAYLOAD_KEY]);
+      const windowStartedAtMs = Date.parse(String(previous.windowStartedAt ?? "")) || now.getTime();
+      const dueAt = new Date(Math.min(
+        now.getTime() + commentDebounceSec * 1000,
+        windowStartedAtMs + commentDebounceMaxSec * 1000,
+      ));
+      const debounce = {
+        issueId,
+        windowStartedAt: new Date(windowStartedAtMs).toISOString(),
+        dueAt: dueAt.toISOString(),
+        commentIds: mergeWakeCommentIds(previous.commentIds, commentId),
+        contextSnapshot: { ...(opts.contextSnapshot ?? {}) },
+      };
+      const payload = { ...(opts.payload ?? {}), [COMMENT_DEBOUNCE_PAYLOAD_KEY]: debounce };
+      if (!existing) {
+        await tx.insert(agentWakeupRequests).values({
+          companyId: agent.companyId,
+          agentId,
+          source: opts.source ?? "automation",
+          triggerDetail: opts.triggerDetail ?? null,
+          reason: "issue_commented",
+          payload,
+          status: COMMENT_DEBOUNCE_STATUS,
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+        });
+        return;
+      }
+      // A human comment keeps ownership of the batch over a later agent comment.
+      const keepRequester =
+        existing.requestedByActorType === "user" && opts.requestedByActorType !== "user";
+      await tx
+        .update(agentWakeupRequests)
+        .set({
+          payload,
+          coalescedCount: existing.coalescedCount + 1,
+          ...(keepRequester
+            ? {}
+            : {
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+              }),
+          updatedAt: now,
+        })
+        .where(and(
+          eq(agentWakeupRequests.id, existing.id),
+          eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+        ));
+    });
+    return true;
+  }
+
+  async function promoteDebouncedCommentWake(requestId: string) {
+    const now = new Date();
+    // Claim before dispatch so overlapping ticks or flushes promote once.
+    const claimed = await db
+      .update(agentWakeupRequests)
+      .set({ status: "coalesced", claimedAt: now, finishedAt: now, updatedAt: now })
+      .where(and(
+        eq(agentWakeupRequests.id, requestId),
+        eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+      ))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!claimed) return null;
+    const { [COMMENT_DEBOUNCE_PAYLOAD_KEY]: rawDebounce, ...payload } = claimed.payload ?? {};
+    const debounce = parseObject(rawDebounce);
+    const issueId = readNonEmptyString(debounce.issueId);
+    const issue = issueId
+      ? await db
+          .select({ assigneeAgentId: issues.assigneeAgentId })
+          .from(issues)
+          .where(and(eq(issues.id, issueId), eq(issues.companyId, claimed.companyId)))
+          .then((rows) => rows[0] ?? null)
+      : null;
+    const heldCommentIds = mergeWakeCommentIds(debounce.commentIds);
+    const liveCommentIds = issueId && heldCommentIds.length > 0
+      ? new Set(await db
+          .select({ id: issueComments.id })
+          .from(issueComments)
+          .where(and(
+            eq(issueComments.companyId, claimed.companyId),
+            eq(issueComments.issueId, issueId),
+            inArray(issueComments.id, heldCommentIds),
+            isNull(issueComments.deletedAt),
+          ))
+          .then((rows) => rows.map((row) => row.id)))
+      : new Set<string>();
+    const commentIds = heldCommentIds.filter((id) => liveCommentIds.has(id));
+    const cancelReason = !issue || issue.assigneeAgentId !== claimed.agentId
+      // The new assignee receives its own assignment wake with the thread.
+      ? "Issue was reassigned or removed during the comment debounce window"
+      : commentIds.length === 0
+        ? "Every held comment was deleted during the comment debounce window"
+        : null;
+    if (cancelReason) {
+      await db
+        .update(agentWakeupRequests)
+        .set({ status: "cancelled", error: cancelReason, updatedAt: new Date() })
+        .where(eq(agentWakeupRequests.id, claimed.id));
+      return null;
+    }
+    const latestCommentId = commentIds[commentIds.length - 1]!;
+    try {
+      const run = await enqueueWakeup(claimed.agentId, {
+        source: claimed.source as WakeupOptions["source"],
+        triggerDetail: (claimed.triggerDetail ?? undefined) as WakeupOptions["triggerDetail"],
+        reason: claimed.reason,
+        payload: { ...payload, commentId: latestCommentId },
+        requestedByActorType: (claimed.requestedByActorType ?? undefined) as WakeupOptions["requestedByActorType"],
+        requestedByActorId: claimed.requestedByActorId,
+        contextSnapshot: {
+          ...parseObject(debounce.contextSnapshot),
+          commentId: latestCommentId,
+          wakeCommentId: latestCommentId,
+          [WAKE_COMMENT_IDS_KEY]: commentIds,
+        },
+        bypassCommentDebounce: true,
+      });
+      if (run) {
+        await db
+          .update(agentWakeupRequests)
+          .set({ runId: run.id, updatedAt: new Date() })
+          .where(eq(agentWakeupRequests.id, claimed.id));
+      }
+      return run;
+    } catch (err) {
+      // Put the batch back so the next tick retries it.
+      await db
+        .update(agentWakeupRequests)
+        .set({
+          status: COMMENT_DEBOUNCE_STATUS,
+          claimedAt: null,
+          finishedAt: null,
+          error: err instanceof Error ? err.message : String(err),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(agentWakeupRequests.id, claimed.id), eq(agentWakeupRequests.status, "coalesced")));
+      throw err;
+    }
+  }
+
+  async function flushDebouncedCommentWakes(agentId: string, issueId: string) {
+    const pending = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.agentId, agentId),
+        eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+        sql`${agentWakeupRequests.payload} #>> ${COMMENT_DEBOUNCE_ISSUE_PATH} = ${issueId}`,
+      ));
+    for (const row of pending) await promoteDebouncedCommentWake(row.id);
+  }
+
+  async function tickDueCommentDebounces(now = new Date()) {
+    const due = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.status, COMMENT_DEBOUNCE_STATUS),
+        sql`(${agentWakeupRequests.payload} #>> ${COMMENT_DEBOUNCE_DUE_PATH})::timestamptz <= ${now.toISOString()}::timestamptz`,
+      ))
+      .orderBy(asc(agentWakeupRequests.requestedAt))
+      .limit(COMMENT_DEBOUNCE_TICK_BATCH);
+    let promoted = 0;
+    for (const row of due) {
+      try {
+        if (await promoteDebouncedCommentWake(row.id)) promoted += 1;
+      } catch (err) {
+        logger.warn({ err, wakeupRequestId: row.id }, "failed to promote debounced comment wake");
+      }
+    }
+    return { checked: due.length, promoted };
+  }
+
+  async function enqueueWakeupNow(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -27832,6 +28486,7 @@ export function heartbeatService(
               conversationState: issues.conversationState,
               status: issues.status,
               statusVersion: issues.statusVersion,
+              priority: issues.priority,
               projectId: issues.projectId,
               projectWorkspaceId: issues.projectWorkspaceId,
               executionWorkspaceId: issues.executionWorkspaceId,
@@ -28651,16 +29306,15 @@ export function heartbeatService(
           // so external pollers/reconcilers can't storm full-price sessions.
           // Server-side recovery retries insert runs directly and never reach
           // this gate.
-          if (
-            isThrottleCandidateIssueRewake({
-              reason,
-              wakeCommentId: wakeCommentId ?? null,
-              requestedByActorType: opts.requestedByActorType ?? null,
-              forceFreshSession:
-                enrichedContextSnapshot.forceFreshSession === true,
-              hasExplicitResume: Boolean(explicitResumeSession),
-            })
-          ) {
+          const isRewakeThrottleCandidate = isThrottleCandidateIssueRewake({
+            reason,
+            wakeCommentId: wakeCommentId ?? null,
+            requestedByActorType: opts.requestedByActorType ?? null,
+            forceFreshSession:
+              enrichedContextSnapshot.forceFreshSession === true,
+            hasExplicitResume: Boolean(explicitResumeSession),
+          });
+          if (isRewakeThrottleCandidate) {
             const throttleNow = new Date();
             const recentTerminalRuns = await tx
               .select({
@@ -28689,7 +29343,11 @@ export function heartbeatService(
                 (sampleRun) => sampleRun.id,
               );
               const progressRows = await tx
-                .select({ runId: activityLog.runId })
+                .select({
+                  runId: activityLog.runId,
+                  action: activityLog.action,
+                  actorType: activityLog.actorType,
+                })
                 .from(activityLog)
                 .where(
                   and(
@@ -28721,7 +29379,10 @@ export function heartbeatService(
                         ),
                         wakeCommentId && opts.requestedByActorType === "agent"
                           ? ne(activityLog.actorType, "agent")
-                          : undefined,
+                          : or(
+                              ne(activityLog.action, ISSUE_COMMENT_ADDED_ACTION),
+                              ne(activityLog.actorType, "agent"),
+                            ),
                       ),
                     )
                     .limit(1)
@@ -28732,6 +29393,7 @@ export function heartbeatService(
                 recentTerminalRuns,
                 runIdsWithIssueProgress: new Set(
                   progressRows
+                    .filter(countsAsIssueProgressActivity)
                     .map((row) => row.runId)
                     .filter((runId): runId is string => Boolean(runId)),
                 ),
@@ -28772,6 +29434,70 @@ export function heartbeatService(
                 });
                 return { kind: "skipped" as const };
               }
+            }
+          }
+
+          // runtimeConfig.heartbeat.cooldownSec spaces out runs of
+          // this agent on this issue when another agent triggers them. It only
+          // covers the throttle class above: a held wake is dropped, so
+          // event-carrying wakes always pass. Human and system wakes never
+          // reach this gate's blocking branch.
+          if (
+            isAgentWakeCooldownCandidate({
+              agentId,
+              cooldownSec: policy.cooldownSec,
+              isThrottleCandidate: isRewakeThrottleCandidate,
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+            })
+          ) {
+            const cooldownNow = new Date();
+            const lastIssueRun = await tx
+              .select({ finishedAt: heartbeatRuns.finishedAt })
+              .from(heartbeatRuns)
+              .where(
+                and(
+                  eq(heartbeatRuns.companyId, agent.companyId),
+                  eq(heartbeatRuns.agentId, agentId),
+                  sql`${heartbeatRuns.finishedAt} is not null`,
+                  sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+                ),
+              )
+              .orderBy(desc(heartbeatRuns.finishedAt))
+              .limit(1)
+              .then((rows) => rows[0] ?? null);
+            const cooldownDecision = evaluateAgentWakeCooldown({
+              now: cooldownNow,
+              cooldownSec: policy.cooldownSec,
+              lastRunFinishedAt: lastIssueRun?.finishedAt ?? null,
+            });
+            if (cooldownDecision.blocked) {
+              await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields,
+                companyId: agent.companyId,
+                agentId,
+                source,
+                triggerDetail,
+                reason: "issue_agent_wake_cooldown",
+                payload: {
+                  ...(payload ?? {}),
+                  issueId,
+                  heartbeatSkip: {
+                    reason: "issue_agent_wake_cooldown",
+                    requestedReason: reason,
+                    cooldownMs: cooldownDecision.cooldownMs,
+                    lastRunFinishedAt:
+                      cooldownDecision.lastRunFinishedAt.toISOString(),
+                    nextAllowedAt: cooldownDecision.nextAllowedAt.toISOString(),
+                  },
+                },
+                status: "skipped",
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null,
+                finishedAt: cooldownNow,
+              });
+              return { kind: "skipped" as const };
             }
           }
 
@@ -28835,6 +29561,43 @@ export function heartbeatService(
             enrichedContextSnapshot.forceFreshSession = true;
             enrichedContextSnapshot.previousRunId = explicitContinuation.previousRunId;
             enrichedContextSnapshot.explicitUserContinuation = explicitContinuation;
+          }
+
+          // Per-agent batch window: an on-demand wake on an idle issue waits in
+          // the agent's batch instead of starting its own run. Off (0) by default.
+          const batchAdmission = decideBatchAdmission({
+            // A promoted comment debounce has already waited its window.
+            batchWindowSec: opts.wakeBatchFlush || opts.bypassCommentDebounce ? 0 : policy.batchWindowSec,
+            source,
+            hasIssue: true,
+            activeExecutionRunPresent: Boolean(activeExecutionRun),
+            requestedByActorType: opts.requestedByActorType ?? null,
+            issuePriority: issue.priority,
+            requiresDedicatedRun: Boolean(
+              durableRequest || executionWaitRequestId || opts.failedRunId || opts.manualUserWake ||
+              opts.queuedCommentInterruptId || opts.queuedCommentRequestId || opts.issueStateGuard ||
+              explicitContinuation || explicitResumeSession || reconciledSourceRunId || automaticParentRunId ||
+              isConversation(issue) || enrichedContextSnapshot.forceFreshSession === true ||
+              readNonEmptyString(enrichedContextSnapshot.interruptedRunId),
+            ),
+          });
+          if (batchAdmission.kind === "batch") {
+            await admitWakeIntoBatch(tx as unknown as Db, {
+              companyId: agent.companyId,
+              agentId,
+              issueId: issue.id,
+              assigneeAgentId: issue.assigneeAgentId,
+              source,
+              triggerDetail,
+              reason,
+              payload,
+              contextSnapshot: enrichedContextSnapshot,
+              wakeCommentId: wakeCommentId ?? null,
+              requestedByActorType: opts.requestedByActorType ?? null,
+              requestedByActorId: opts.requestedByActorId ?? null,
+              idempotencyKey: opts.idempotencyKey ?? null,
+            });
+            return { kind: "batched" as const };
           }
 
           const wakeupRequest = await tx
@@ -29008,7 +29771,7 @@ export function heartbeatService(
       if (outcome.kind === "durable") {
         return outcome.receipt.runId ? getRun(outcome.receipt.runId) : null;
       }
-      if (outcome.kind === "deferred" || outcome.kind === "skipped") {
+      if (outcome.kind === "deferred" || outcome.kind === "skipped" || outcome.kind === "batched") {
         return null;
       }
       if (outcome.kind === "coalesced") {
@@ -30024,7 +30787,12 @@ export function heartbeatService(
         await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
-        await startNextQueuedRunForAgent(run.agentId);
+        if (run.status === "running") {
+          // A running run freed an instance slot; promote oldest-first.
+          scheduleGlobalQueuedRunPromotion();
+        } else {
+          await startNextQueuedRunForAgent(run.agentId);
+        }
       }
       return cancelled;
     } finally {
@@ -30514,6 +31282,7 @@ export function heartbeatService(
     retryScheduledRetryNow,
 
     resumeQueuedRuns,
+    flushDueWakeBatches,
 
     scheduleBoundedRetry: async (
       runId: string,
@@ -30634,10 +31403,11 @@ export function heartbeatService(
       }
 
       const issueMonitors = await tickDueIssueMonitors(now);
+      const commentDebounces = await tickDueCommentDebounces(now);
 
       return {
-        checked: checked + issueMonitors.checked,
-        enqueued: enqueued + issueMonitors.triggered,
+        checked: checked + issueMonitors.checked + commentDebounces.checked,
+        enqueued: enqueued + issueMonitors.triggered + commentDebounces.promoted,
         skipped: skipped + issueMonitors.skipped,
       };
     },

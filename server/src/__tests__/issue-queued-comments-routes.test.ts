@@ -1408,7 +1408,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const seeded = await seedQueue();
     const queueRunId = await promoteQueue(seeded);
     await db.delete(issueComments).where(eq(issueComments.issueId, seeded.issueId));
-    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    const heartbeat = heartbeatService(db, { runtimeEnv: { PAPERCLIP_MAX_CONCURRENT_RUNS: process.env.PAPERCLIP_MAX_CONCURRENT_RUNS } });
 
     await heartbeat.resumeQueuedRuns();
 
@@ -1500,7 +1500,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .update(heartbeatRuns)
       .set({ runtimeMode: "legacy" })
       .where(eq(heartbeatRuns.id, queueRunId));
-    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    const heartbeat = heartbeatService(db, { runtimeEnv: { PAPERCLIP_MAX_CONCURRENT_RUNS: process.env.PAPERCLIP_MAX_CONCURRENT_RUNS } });
 
     const [discard] = await Promise.all([
       request(app(seeded.companyId))

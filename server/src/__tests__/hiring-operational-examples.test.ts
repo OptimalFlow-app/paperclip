@@ -30,7 +30,7 @@ describe("published hiring and human-input examples", () => {
   });
 
   it("includes a complete valid text-field recipe in the skill itself", () => {
-    const skill = readFileSync(new URL("../../../skills/paperclip/SKILL.md", import.meta.url), "utf8");
+    const skill = readFileSync(new URL("../../../skills/paperclip/references/interactions.md", import.meta.url), "utf8");
     const section = skill.split('<a id="asking-for-human-input"></a>')[1]!;
     const body = JSON.parse(section.match(/```json\n([\s\S]*?)\n```/)![1]);
     const normalized = createIssueThreadInteractionSchema.parse(substituteIds(body));

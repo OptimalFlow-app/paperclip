@@ -48,6 +48,15 @@ if (!process.env.PAPERCLIP_MANAGED_RUNTIME_HTTPS) {
   process.env.PAPERCLIP_MANAGED_RUNTIME_HTTPS = "off";
 }
 
+// The instance-wide concurrent-run cap (default 3) counts every `running` row
+// in the database. Many suites seed `running` runs and only reset in-memory
+// state between tests, so those rows pile up in the file's shared Postgres and
+// would leave later runs stuck in `queued`. Lift the cap for the suite; tests
+// that exercise the cap strip this variable and pass their own runtimeEnv.
+if (!process.env.PAPERCLIP_MAX_CONCURRENT_RUNS) {
+  process.env.PAPERCLIP_MAX_CONCURRENT_RUNS = "1000";
+}
+
 if (!SupertestTest.prototype.__paperclipLoopbackPatched) {
   SupertestTest.prototype.serverAddress = function serverAddress(app, path) {
     const addr = app.address();

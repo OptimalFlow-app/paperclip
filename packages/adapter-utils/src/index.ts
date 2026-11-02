@@ -54,6 +54,7 @@ export type {
 } from "./session-compaction.js";
 export {
   ADAPTER_SESSION_MANAGEMENT,
+  DEFAULT_MAX_SESSION_CONTEXT_TOKENS,
   LEGACY_SESSIONED_ADAPTER_TYPES,
   getAdapterSessionManagement,
   readSessionCompactionOverride,

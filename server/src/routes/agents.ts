@@ -2442,6 +2442,7 @@ export function agentRoutes(
     return {
       enabled: parseBooleanLike(heartbeat.enabled) ?? false,
       intervalSec: Math.max(0, parseNumberLike(heartbeat.intervalSec) ?? 0),
+      batchWindowSec: Math.max(0, parseNumberLike(heartbeat.batchWindowSec) ?? 0),
     };
   }
 

@@ -313,7 +313,7 @@ describeEmbeddedPostgres("heartbeat worktree suppression", () => {
       .set({ status: "in_review", updatedAt: new Date() })
       .where(eq(issues.id, issueId));
 
-    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    const heartbeat = heartbeatService(db, { runtimeEnv: { PAPERCLIP_MAX_CONCURRENT_RUNS: process.env.PAPERCLIP_MAX_CONCURRENT_RUNS } });
 
     const run = await heartbeat.wakeup(agentId, {
       source: "assignment",

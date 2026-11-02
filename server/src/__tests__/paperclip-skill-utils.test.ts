@@ -296,8 +296,10 @@ describe("paperclip skill utils", () => {
 
   it("keeps the external-chat shortcut behind the server-verified harness boundary", async () => {
     const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
-    const shortcut = skillBody.match(
-      /## Server-Verified External Chat Turns(?<body>[\s\S]*?)\n## The Heartbeat Procedure/,
+    const chatTurns = await fs.readFile(path.resolve("skills/paperclip/references/chat-turns.md"), "utf8");
+    expect(skillBody).toContain("server-verified external chat turns: `references/chat-turns.md`");
+    const shortcut = chatTurns.match(
+      /## Server-Verified External Chat Turns(?<body>[\s\S]*?)\n## Relation to the heartbeat procedure/,
     )?.groups?.body;
 
     expect(shortcut).toBeTruthy();
@@ -519,13 +521,24 @@ describe("paperclip skill utils", () => {
   });
 
   it("uses the authoritative PATCH response to confirm monitor scheduling", async () => {
-    const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
+    const skillBody = await fs.readFile(path.resolve("skills/paperclip/references/heartbeat-details.md"), "utf8");
 
     expect(skillBody).toContain("Use that request's default full response");
     expect(skillBody).toContain("do not issue a confirming GET");
     expect(skillBody).toContain("`monitorNextCheckAt` is non-null");
     expect(skillBody).toContain("`assigneeAgentId` is set");
     expect(skillBody).toContain("`assigneeUserId` is null");
+  });
+
+  it("keeps the core Paperclip skill small and indexes every on-demand reference", async () => {
+    const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
+    expect(Buffer.byteLength(skillBody)).toBeLessThanOrEqual(12 * 1024);
+    // Every reference is reachable from the core index, directly or through an indexed reference.
+    const indexed = [...new Set(skillBody.match(/references\/[\w.-]+\.md/g))];
+    const reachable = [skillBody, ...await Promise.all(indexed.map(ref => fs.readFile(path.resolve("skills/paperclip", ref), "utf8")))].join("\n");
+    for (const name of await fs.readdir(path.resolve("skills/paperclip/references"))) {
+      expect(reachable, name).toContain(name);
+    }
   });
 
   it("requires issue-update writes to be verified, not inferred", async () => {
