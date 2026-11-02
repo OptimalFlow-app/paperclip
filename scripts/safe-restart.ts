@@ -1,4 +1,3 @@
-#!/usr/bin/env -S node --import tsx
 /**
  * Safe, detached restart of a local Paperclip instance started with
  * `pnpm paperclipai run` from this checkout.
@@ -358,7 +357,7 @@ export function formatOutcomeComment(outcome: RestartOutcome): string {
     lines.push("", "### SQL destructif dans les migrations en attente", "");
     for (const entry of outcome.destructive) {
       for (const finding of entry.findings) {
-        lines.push(`- \`${entry.file}\` ligne ${finding.line} (${finding.kind}) : \`${finding.text.replace(/`/g, "'")}\``);
+        lines.push(`- \`${entry.file}\` ligne ${finding.line} (${finding.kind}) : \`${finding.text.replaceAll("`", "'")}\``);
       }
     }
     lines.push("", "Le serveur n'a pas été arrêté. Appliquer ces migrations demande un redémarrage manuel validé par un fondateur.");
