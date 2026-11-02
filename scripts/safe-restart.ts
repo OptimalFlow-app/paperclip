@@ -17,7 +17,7 @@
  * If the server does not come back: one relaunch retry, then a macOS notification
  * and `<instance>/data/safe-restart-last.json`.
  */
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -394,39 +394,49 @@ function isPidAlive(pid: number) {
   }
 }
 
-function processCwd(pid: number): string | null {
-  const result = run("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
+// Async variants let the launcher run its probes in parallel (2 s budget).
+function runAsync(command: string, args: string[]) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(command, args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const status = error ? (typeof error.code === "number" ? error.code : 1) : 0;
+      resolve({ status, stdout: stdout ?? "", stderr: stderr ?? "" });
+    });
+  });
+}
+
+async function gitAsync(args: string[]) {
+  const result = await runAsync("git", ["-C", REPO_ROOT, ...args]);
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim()}`);
+  return result.stdout.trim();
+}
+
+async function processCwd(pid: number): Promise<string | null> {
+  const result = await runAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
   const line = result.stdout.split("\n").find((entry) => entry.startsWith("n"));
   return line ? line.slice(1) : null;
 }
 
-function parentPid(pid: number): number | null {
-  const result = run("ps", ["-o", "ppid=", "-p", String(pid)]);
-  const parsed = Number(result.stdout.trim());
-  return Number.isInteger(parsed) && parsed > 1 ? parsed : null;
-}
-
-function processArgs(pid: number): string | null {
-  const result = run("ps", ["-o", "args=", "-p", String(pid)]);
-  return result.status === 0 ? result.stdout.trim() : null;
-}
-
 /** The server pid plus the `pnpm paperclipai run` / tsx wrappers that launched it. */
-function serverProcessChain(serverPid: number): number[] {
+async function serverProcessChain(serverPid: number): Promise<number[]> {
+  const table = new Map<number, { ppid: number; args: string }>();
+  for (const line of (await runAsync("ps", ["-axo", "pid=,ppid=,args="])).stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (match) table.set(Number(match[1]), { ppid: Number(match[2]), args: match[3] });
+  }
   const chain = [serverPid];
-  let current = parentPid(serverPid);
-  while (current) {
-    const args = processArgs(current) ?? "";
-    if (!/paperclipai run|cli\/src\/index\.ts run/.test(args)) break;
+  let current = table.get(serverPid)?.ppid ?? 0;
+  while (current > 1 && /paperclipai run|cli\/src\/index\.ts run/.test(table.get(current)?.args ?? "")) {
     chain.push(current);
-    current = parentPid(current);
+    current = table.get(current)?.ppid ?? 0;
   }
   return chain;
 }
 
-function readProcessEnv(pid: number): Record<string, string> | null {
-  const withEnv = run("ps", ["eww", "-o", "command=", "-p", String(pid)]);
-  const argsOnly = run("ps", ["-o", "command=", "-p", String(pid)]);
+async function readProcessEnv(pid: number): Promise<Record<string, string> | null> {
+  const [withEnv, argsOnly] = await Promise.all([
+    runAsync("ps", ["eww", "-o", "command=", "-p", String(pid)]),
+    runAsync("ps", ["-o", "command=", "-p", String(pid)]),
+  ]);
   if (withEnv.status !== 0 || argsOnly.status !== 0) return null;
   const env = parsePsEnvironment(withEnv.stdout, argsOnly.stdout);
   return Object.keys(env).length > 0 ? env : null;
@@ -569,17 +579,27 @@ async function runLauncher(argv: string[]) {
   if (!runtimeInfo?.pid || !runtimeInfo.port) fail(`no running server recorded in ${paths.runtimeInfoPath}`);
   const serverPid = runtimeInfo.pid;
   if (!isPidAlive(serverPid)) fail(`server pid ${serverPid} from ${paths.runtimeInfoPath} is not running`);
-  const serverCwd = processCwd(serverPid);
+  const apiBase = `http://${runtimeInfo.host && runtimeInfo.host !== "0.0.0.0" ? runtimeInfo.host : "127.0.0.1"}:${runtimeInfo.port}`;
+  const apiKey = process.env.PAPERCLIP_API_KEY?.trim() || null;
+
+  // Independent probes run in parallel; each check below fails fast in order.
+  const [serverCwd, revParse, dirty, health, issueResponse, serverChain] = await Promise.all([
+    processCwd(serverPid),
+    gitAsync(["rev-parse", "--abbrev-ref", "HEAD", "HEAD"]),
+    gitAsync(["status", "--porcelain"]),
+    fetchHealth(apiBase),
+    apiRequest(apiBase, apiKey, `/api/issues/${encodeURIComponent(options.issue)}`).catch(() => null),
+    serverProcessChain(serverPid),
+  ]);
   if (!serverCwd || fs.realpathSync(serverCwd) !== fs.realpathSync(REPO_ROOT)) {
     fail(`server pid ${serverPid} runs from ${serverCwd ?? "?"}, not from this checkout (${REPO_ROOT}); run the script from the server's checkout`);
   }
 
-  const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
+  const [branch, commit] = revParse.split("\n");
   if (branch === "HEAD") fail("the checkout is on a detached HEAD");
   if (options.branch && options.branch !== branch) {
     fail(`checkout is on branch '${branch}', expected '${options.branch}' (the script never switches branches)`);
   }
-  const dirty = git(["status", "--porcelain"]);
   if (dirty) fail(`the working tree has local changes:\n${dirty}`);
 
   const lockfile = path.join(REPO_ROOT, "pnpm-lock.yaml");
@@ -592,20 +612,14 @@ async function runLauncher(argv: string[]) {
     fail("node_modules/.pnpm/lock.yaml is missing: dependencies are not installed in this checkout");
   }
 
-  const apiBase = `http://${runtimeInfo.host && runtimeInfo.host !== "0.0.0.0" ? runtimeInfo.host : "127.0.0.1"}:${runtimeInfo.port}`;
-  const health = await fetchHealth(apiBase);
   if (!health) fail(`server at ${apiBase} does not answer /api/health`);
-
-  const apiKey = process.env.PAPERCLIP_API_KEY?.trim() || null;
-  const issueResponse = await apiRequest(apiBase, apiKey, `/api/issues/${encodeURIComponent(options.issue)}`);
-  if (!issueResponse.ok) fail(`issue ${options.issue} is not readable on ${apiBase} (HTTP ${issueResponse.status})`);
+  if (!issueResponse?.ok) fail(`issue ${options.issue} is not readable on ${apiBase} (HTTP ${issueResponse?.status ?? "error"})`);
 
   fs.mkdirSync(paths.logsDir, { recursive: true });
   fs.mkdirSync(paths.dataDir, { recursive: true });
   acquireLock(paths.lockPath, process.pid);
 
-  const serverChain = serverProcessChain(serverPid);
-  const serverEnv = readProcessEnv(serverChain[serverChain.length - 1]) ?? readProcessEnv(serverPid);
+  const serverEnv = (await readProcessEnv(serverChain[serverChain.length - 1])) ?? (await readProcessEnv(serverPid));
   const relaunchEnv = buildRelaunchEnv({
     serverEnv,
     callerEnv: process.env,
@@ -624,7 +638,7 @@ async function runLauncher(argv: string[]) {
     serverChain,
     previousProcessStartedAt: health.processStartedAt,
     branch,
-    commit: git(["rev-parse", "HEAD"]),
+    commit,
     relaunchEnv,
     requestedByRunId: process.env.PAPERCLIP_RUN_ID?.trim() || null,
     logPath,
