@@ -166,6 +166,65 @@ describe("ProjectFlowView", () => {
     expect(cells[3]!.textContent).toMatch(/Verifier.*Alexis/);
   });
 
+  it("filters deliverables by state and keeps the filter per project", async () => {
+    window.localStorage.clear();
+    const notStarted = {
+      ...flow.pipelines[0]!.cases[0]!,
+      id: "case-2",
+      caseKey: "deck-ademe",
+      title: "Deck ADEME",
+      originIssue: null,
+      steps: flow.pipelines[0]!.stages.map((stage) => step(stage.id, "not_started")),
+      progress: { done: 0, total: 4 },
+    };
+    mocks.flow.mockResolvedValue({
+      ...flow,
+      pipelines: [{ ...flow.pipelines[0]!, cases: [...flow.pipelines[0]!.cases, notStarted] }],
+    });
+    const render = async () => {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={client}>
+            <TooltipProvider>
+              <ProjectFlowView projectId="project" companyId="company" />
+            </TooltipProvider>
+          </QueryClientProvider>,
+        );
+      });
+      for (let attempt = 0; attempt < 20 && !container.querySelector('[data-testid="project-flow"]'); attempt += 1) {
+        await act(async () => {
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
+        });
+      }
+    };
+    const titles = () => [...container.querySelectorAll('[data-testid="project-flow-case"]')].map((row) => row.querySelector("span")?.textContent);
+    const filterButton = (state: string, index = 0) =>
+      container.querySelectorAll<HTMLButtonElement>(`[data-flow-filter="${state}"] button`)[index]!;
+
+    await render();
+    expect(titles()).toEqual(["Deck BPI", "Deck ADEME"]);
+    expect(filterButton("not_started").textContent).toContain("1");
+
+    await act(async () => filterButton("not_started").click());
+    expect(titles()).toEqual(["Deck BPI"]);
+    expect(container.textContent).toContain("1 of 2 deliverables");
+
+    // "only" keeps a single state; nothing is blocked here.
+    await act(async () => filterButton("blocked", 1).click());
+    expect(titles()).toEqual([]);
+    expect(container.textContent).toContain("No deliverable matches the filter.");
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(titles()).toEqual([]);
+
+    await act(async () => [...container.querySelectorAll("button")].find((b) => b.textContent === "Show all")!.click());
+    expect(titles()).toEqual(["Deck BPI", "Deck ADEME"]);
+    expect(window.localStorage.getItem("paperclip:project-flow:hidden-states:project")).toBeNull();
+  });
+
   it("explains how to start when the project has no pipeline", async () => {
     mocks.flow.mockResolvedValue({ projectId: "project", pipelines: [] });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
