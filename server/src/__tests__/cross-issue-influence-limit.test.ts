@@ -5,6 +5,7 @@ import {
   crossIssueInfluenceLimitError,
   evaluateCrossIssueInfluenceLimit,
   observeCrossIssueInfluence,
+  readRunOwnIssueRefs,
 } from "../services/cross-issue-influence-limit.ts";
 
 function counterDb(
@@ -211,6 +212,74 @@ describe("cross-issue influence limit rollout", () => {
       status: 403,
       details: { code: "cross_issue_influence_run_context_required" },
     });
+    expect(fake.inserted).toEqual([]);
+  });
+});
+
+describe("wake_batch runs own the issues of their batch (OPT-533)", () => {
+  const BATCH_A = "66666666-6666-4666-8666-666666666666";
+  const BATCH_B = "77777777-7777-4777-8777-777777777777";
+  const OUTSIDE = "88888888-8888-4888-8888-888888888888";
+  const batchSnapshot = {
+    wakeReason: "wake_batch",
+    paperclipBatchedWakes: [
+      { issueId: BATCH_A, identifier: "OPT-10" },
+      { issueId: BATCH_B, identifier: "opt-11" },
+    ],
+  };
+  const base = {
+    companyId: "22222222-2222-4222-8222-222222222222",
+    runId: "11111111-1111-4111-8111-111111111111",
+    agentId: "33333333-3333-4333-8333-333333333333",
+    now: CROSS_ISSUE_INFLUENCE_ENFORCE_AT,
+  } as const;
+
+  it("reads own issue refs from issueId and from each batched wake", () => {
+    expect(readRunOwnIssueRefs(null)).toEqual({ ids: [], identifiers: [] });
+    expect(readRunOwnIssueRefs({ wakeReason: "wake_batch", paperclipBatchedWakes: [] }))
+      .toEqual({ ids: [], identifiers: [] });
+    expect(readRunOwnIssueRefs({ issueId: BATCH_A })).toEqual({ ids: [BATCH_A], identifiers: [] });
+    expect(readRunOwnIssueRefs({
+      ...batchSnapshot,
+      paperclipBatchedWakes: [...batchSnapshot.paperclipBatchedWakes, null, "junk", { identifier: 3 }],
+    })).toEqual({ ids: [BATCH_A, BATCH_B], identifiers: ["OPT-10", "OPT-11"] });
+  });
+
+  it.each([
+    ["first batch issue by id", { targetIssueId: BATCH_A }],
+    ["second batch issue by id", { targetIssueId: BATCH_B }],
+    ["batch issue by identifier, different case", { targetIssueId: OUTSIDE, targetIssueIdentifier: "Opt-11" }],
+  ] as const)("treats the %s as the run's own issue: not counted, not refused", async (_label, target) => {
+    const fake = counterDb(CROSS_ISSUE_INFLUENCE_LIMIT, { contextSnapshot: batchSnapshot });
+    for (const kind of ["comment", "update", "interaction_resolution"] as const) {
+      await expect(observeCrossIssueInfluence(fake.db as never, { ...base, ...target, kind }))
+        .resolves.toBeNull();
+    }
+    expect(fake.inserted).toEqual([]);
+  });
+
+  it("still refuses a batch run writing outside its batch", async () => {
+    const fake = counterDb(0, { contextSnapshot: batchSnapshot });
+    await expect(observeCrossIssueInfluence(fake.db as never, {
+      ...base,
+      targetIssueId: OUTSIDE,
+      targetIssueIdentifier: "OPT-12",
+      kind: "comment",
+    })).rejects.toMatchObject({
+      status: 403,
+      details: { code: "cross_issue_influence_run_context_required" },
+    });
+    expect(fake.inserted).toEqual([]);
+  });
+
+  it("keeps a normal run's same-issue match by identifier, case-insensitive", async () => {
+    const fake = counterDb(0, { contextSnapshot: { issueId: "OPT-10" } });
+    await expect(observeCrossIssueInfluence(fake.db as never, {
+      ...base,
+      targetIssueId: BATCH_A,
+      targetIssueIdentifier: "opt-10",
+      kind: "comment",
+    })).resolves.toBeNull();
     expect(fake.inserted).toEqual([]);
   });
 });
