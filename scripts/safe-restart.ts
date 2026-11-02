@@ -585,7 +585,7 @@ async function runLauncher(argv: string[]) {
   // Independent probes run in parallel; each check below fails fast in order.
   const [serverCwd, revParse, dirty, health, issueResponse, serverChain] = await Promise.all([
     processCwd(serverPid),
-    gitAsync(["rev-parse", "--abbrev-ref", "HEAD", "HEAD"]),
+    gitAsync(["rev-parse", "HEAD", "--abbrev-ref", "HEAD"]),
     gitAsync(["status", "--porcelain"]),
     fetchHealth(apiBase),
     apiRequest(apiBase, apiKey, `/api/issues/${encodeURIComponent(options.issue)}`).catch(() => null),
@@ -595,7 +595,7 @@ async function runLauncher(argv: string[]) {
     fail(`server pid ${serverPid} runs from ${serverCwd ?? "?"}, not from this checkout (${REPO_ROOT}); run the script from the server's checkout`);
   }
 
-  const [branch, commit] = revParse.split("\n");
+  const [commit, branch] = revParse.split("\n");
   if (branch === "HEAD") fail("the checkout is on a detached HEAD");
   if (options.branch && options.branch !== branch) {
     fail(`checkout is on branch '${branch}', expected '${options.branch}' (the script never switches branches)`);
