@@ -19,6 +19,7 @@
  */
 import { execFile, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -495,11 +496,38 @@ interface HealthSnapshot {
   branchName: string | null;
 }
 
+interface HttpResult {
+  ok: boolean;
+  status: number;
+  body: string;
+  json<T = unknown>(): T;
+}
+
+/** Minimal loopback HTTP client: node:http starts much faster than fetch/undici. */
+function httpRequest(url: string, init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number } = {}) {
+  return new Promise<HttpResult>((resolve, reject) => {
+    const request = http.request(url, { method: init.method ?? "GET", headers: init.headers, timeout: init.timeoutMs ?? 10_000 }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => {
+        const status = response.statusCode ?? 0;
+        const body = Buffer.concat(chunks).toString("utf8");
+        resolve({ ok: status >= 200 && status < 300, status, body, json: <T,>() => JSON.parse(body) as T });
+      });
+      response.on("error", reject);
+    });
+    request.on("timeout", () => request.destroy(new Error(`timeout after ${init.timeoutMs ?? 10_000} ms: ${url}`)));
+    request.on("error", reject);
+    if (init.body) request.write(init.body);
+    request.end();
+  });
+}
+
 async function fetchHealth(apiBase: string, timeoutMs = 3_000): Promise<HealthSnapshot | null> {
   try {
-    const response = await fetch(`${apiBase}/api/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    const response = await httpRequest(`${apiBase}/api/health`, { timeoutMs });
     if (!response.ok) return null;
-    const body = await response.json() as { serverInfo?: { processStartedAt?: unknown; git?: { branchName?: unknown } } };
+    const body = response.json<{ serverInfo?: { processStartedAt?: unknown; git?: { branchName?: unknown } } }>();
     return {
       processStartedAt: typeof body.serverInfo?.processStartedAt === "string" ? body.serverInfo.processStartedAt : null,
       branchName: typeof body.serverInfo?.git?.branchName === "string" ? body.serverInfo.git.branchName : null,
@@ -509,21 +537,31 @@ async function fetchHealth(apiBase: string, timeoutMs = 3_000): Promise<HealthSn
   }
 }
 
-/** Calls the instance API with the agent key, falling back to the local board actor. */
-async function apiRequest(apiBase: string, apiKey: string | null, pathname: string, init: RequestInit = {}) {
-  const attempt = (withKey: boolean) => fetch(`${apiBase}${pathname}`, {
-    ...init,
+/**
+ * Calls the instance API with the agent key, falling back to the local board
+ * actor on 401/403 (`keyFirst: false` tries the board actor first).
+ */
+async function apiRequest(
+  apiBase: string,
+  apiKey: string | null,
+  pathname: string,
+  init: { method?: string; body?: string; keyFirst?: boolean } = {},
+) {
+  const attempt = (withKey: boolean) => httpRequest(`${apiBase}${pathname}`, {
+    method: init.method,
+    body: init.body,
     headers: {
       ...(init.body ? { "Content-Type": "application/json" } : {}),
       ...(withKey && apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     },
-    signal: AbortSignal.timeout(10_000),
   });
-  if (apiKey) {
-    const response = await attempt(true);
+  const order = !apiKey ? [false] : init.keyFirst === false ? [false, true] : [true, false];
+  let response: HttpResult | null = null;
+  for (const withKey of order) {
+    response = await attempt(withKey);
     if (response.status !== 401 && response.status !== 403) return response;
   }
-  return attempt(false);
+  return response as HttpResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +626,7 @@ async function runLauncher(argv: string[]) {
     gitAsync(["rev-parse", "HEAD", "--abbrev-ref", "HEAD"]),
     gitAsync(["status", "--porcelain"]),
     fetchHealth(apiBase),
-    apiRequest(apiBase, apiKey, `/api/issues/${encodeURIComponent(options.issue)}`).catch(() => null),
+    apiRequest(apiBase, apiKey, `/api/issues/${encodeURIComponent(options.issue)}`, { keyFirst: false }).catch(() => null),
     serverProcessChain(serverPid),
   ]);
   if (!serverCwd || fs.realpathSync(serverCwd) !== fs.realpathSync(REPO_ROOT)) {
@@ -762,12 +800,12 @@ async function runWorker() {
       }
       const companiesResponse = await apiRequest(apiBase, apiKey, "/api/companies");
       if (!companiesResponse.ok) throw new Abort(`GET /api/companies a répondu ${companiesResponse.status}`);
-      const companies = await companiesResponse.json() as Array<{ id: string }>;
+      const companies = companiesResponse.json<Array<{ id: string }>>();
       const payloads: unknown[] = [];
       for (const company of companies) {
         const response = await apiRequest(apiBase, apiKey, `/api/companies/${company.id}/live-runs`);
         if (!response.ok) throw new Abort(`GET live-runs (${company.id}) a répondu ${response.status}`);
-        payloads.push(await response.json());
+        payloads.push(response.json());
       }
       const live = countLiveRuns(payloads);
       remaining = live.runIds;
@@ -940,7 +978,7 @@ async function runWorker() {
         body: JSON.stringify({ body: formatOutcomeComment(outcome) }),
       });
       commented = response.ok;
-      log(commented ? `commented ${options.issue}` : `comment failed: HTTP ${response.status} ${await response.text()}`);
+      log(commented ? `commented ${options.issue}` : `comment failed: HTTP ${response.status} ${response.body.slice(0, 500)}`);
     } catch (error) {
       log(`comment failed: ${(error as Error).message}`);
     }
