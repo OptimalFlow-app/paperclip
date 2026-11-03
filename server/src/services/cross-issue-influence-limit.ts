@@ -43,6 +43,41 @@ function readRunSourceIssueId(contextSnapshot: unknown) {
   return null;
 }
 
+/**
+ * The issues a run owns outright. A `wake_batch` run carries no single
+ * `issueId`; it owns every issue of its batch (`paperclipBatchedWakes`), and
+ * only those. Identifiers are upper-cased so the match is case-insensitive.
+ */
+export function readRunOwnIssueRefs(contextSnapshot: unknown): { ids: string[]; identifiers: string[] } {
+  const ids: string[] = [];
+  const identifiers: string[] = [];
+  if (!contextSnapshot || typeof contextSnapshot !== "object" || Array.isArray(contextSnapshot)) {
+    return { ids, identifiers };
+  }
+  const sourceIssueId = readRunSourceIssueId(contextSnapshot);
+  if (sourceIssueId) ids.push(sourceIssueId);
+  const batched = (contextSnapshot as Record<string, unknown>).paperclipBatchedWakes;
+  if (Array.isArray(batched)) {
+    for (const entry of batched) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const { issueId, identifier } = entry as Record<string, unknown>;
+      if (typeof issueId === "string" && issueId.trim()) ids.push(issueId.trim());
+      if (typeof identifier === "string" && identifier.trim()) identifiers.push(identifier.trim().toUpperCase());
+    }
+  }
+  return { ids, identifiers };
+}
+
+function runOwnsIssue(
+  refs: { ids: string[]; identifiers: string[] },
+  targetIssueId: string,
+  targetIssueIdentifier?: string | null,
+) {
+  const targetIdentifier = targetIssueIdentifier?.trim().toUpperCase() || null;
+  return refs.ids.some((ref) => ref === targetIssueId || (targetIdentifier !== null && ref.toUpperCase() === targetIdentifier)) ||
+    (targetIdentifier !== null && refs.identifiers.includes(targetIdentifier));
+}
+
 export function evaluateCrossIssueInfluenceLimit(input: {
   priorCount: number;
   now?: Date;
@@ -109,14 +144,15 @@ export async function observeCrossIssueInfluence(
       throw crossIssueInfluenceRunContextError();
     }
 
-    const sourceIssueId = readRunSourceIssueId(run.contextSnapshot);
-    if (!sourceIssueId) throw crossIssueInfluenceRunContextError();
-    if (
-      sourceIssueId === input.targetIssueId ||
-      (input.targetIssueIdentifier && sourceIssueId.toUpperCase() === input.targetIssueIdentifier.toUpperCase())
-    ) {
+    // Writes on the run's own issues (its `issueId`, or each issue of a
+    // `wake_batch`) are not cross-issue: neither counted nor refused.
+    if (runOwnsIssue(readRunOwnIssueRefs(run.contextSnapshot), input.targetIssueId, input.targetIssueIdentifier)) {
       return null;
     }
+    // A run with no single source issue (a batch run writing outside its
+    // batch) has nothing to attribute the cross-issue write to.
+    const sourceIssueId = readRunSourceIssueId(run.contextSnapshot);
+    if (!sourceIssueId) throw crossIssueInfluenceRunContextError();
 
     const priorCount = await tx
       .select({ count: count() })
