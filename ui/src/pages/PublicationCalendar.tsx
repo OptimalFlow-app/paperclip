@@ -535,7 +535,7 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
   const handOff = async () => {
     // Text-prefilling networks get the image on the clipboard (paste it in the
     // composer); the others get the caption, and the image is downloaded.
-    // A Reel's video always goes to downloads.
+    // A Reel's video and cover always go to downloads.
     const copyImageFirst = meta.prefillsText && !!firstImage;
     try {
       if (copyImageFirst) await copyImage(firstImage);
@@ -546,6 +546,8 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
     }
     if (firstImage && !meta.prefillsText) downloadAttachment(firstImage, "image.png");
     if (reel) downloadAttachment(reel.video, "reel.mp4");
+    // Chrome drops a second download fired in the same tick.
+    if (reel?.cover) window.setTimeout(() => downloadAttachment(reel.cover!, "cover.png"), 400);
     window.open(meta.composeUrl(text), "_blank", "noopener,noreferrer");
   };
 
@@ -619,7 +621,9 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
               <Send className="h-4 w-4" />
               Post on {meta.label}
             </Button>
-            <p className="text-xs text-muted-foreground">{handOffHint(meta.label, meta.prefillsText, reel ? "video" : firstImage ? "image" : null)}</p>
+            <p className="text-xs text-muted-foreground">
+              {handOffHint(meta.label, meta.prefillsText, reel ? (reel.cover ? "video+cover" : "video") : firstImage ? "image" : null)}
+            </p>
           </div>
         ) : null}
 
@@ -644,16 +648,26 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
                 <Download className="h-3.5 w-3.5" />
                 Download video
               </Button>
-              {reel.cover ? (
-                <Button size="sm" variant="outline" onClick={() => downloadAttachment(reel.cover!, "cover.png")}>
-                  <Download className="h-3.5 w-3.5" />
-                  Download cover
-                </Button>
-              ) : null}
               <span className="text-xs text-muted-foreground">
                 {reel.shareToFeed ? "Also shown in the profile grid" : "Reels tab only, not in the profile grid"}
               </span>
             </div>
+            {reel.cover ? (
+              <div className="flex flex-col gap-2">
+                <h3 className="text-xs font-medium uppercase text-muted-foreground">Cover</h3>
+                <img
+                  src={attachmentContentUrl(reel.cover.attachmentId)}
+                  alt={reel.cover.name ?? "Reel cover"}
+                  className="max-h-96 w-full rounded-md border border-border bg-muted/30 object-contain"
+                />
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => downloadAttachment(reel.cover!, "cover.png")}>
+                    <Download className="h-3.5 w-3.5" />
+                    Download cover
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -733,7 +747,10 @@ function PostDetail({ entry, now }: { entry: PublicationEntry; now: Date }) {
   );
 }
 
-function handOffHint(label: string, prefillsText: boolean, media: "image" | "video" | null) {
+function handOffHint(label: string, prefillsText: boolean, media: "image" | "video" | "video+cover" | null) {
+  if (media === "video+cover") {
+    return `Copies the text, downloads the video and its cover and opens ${label}: create a Reel, drop in the video, set the cover, paste the text (⌘V).`;
+  }
   if (media === "video") {
     return `Copies the text, downloads the video and opens ${label}: create a Reel, drop in the video, paste the text (⌘V).`;
   }
