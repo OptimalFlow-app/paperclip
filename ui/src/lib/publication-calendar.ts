@@ -7,6 +7,10 @@
  *   { "version": 1, "posts": [{ "network": "instagram", "scheduledAt": "...",
  *     "text": "...", "images": [{ "attachmentId": "..." }], ... }] }
  *
+ * A Reel (OPT-472) carries `video` instead of `images`, plus an optional
+ * `cover`, `shareToFeed` (default true) and `trialReel` — the same fields
+ * `publier-calendrier.mjs` reads in com-market.
+ *
  * Everything around the block is free markdown for humans. This module parses
  * that block, maps posts to calendar entries, and knows how to hand a post to
  * each network (compose URL, what goes in the clipboard).
@@ -30,6 +34,14 @@ export interface PublicationPost {
   status?: PublicationStatus;
   text: string;
   images?: PublicationImage[];
+  /** Reel video; never alongside `images`. */
+  video?: PublicationImage;
+  /** Reel cover image. */
+  cover?: PublicationImage;
+  /** Reel also shown in the profile grid (default true). */
+  shareToFeed?: boolean;
+  /** Trial Reel: shown to non-followers first. */
+  trialReel?: boolean;
   publishedAt?: string | null;
   publishedUrl?: string | null;
 }
@@ -104,6 +116,27 @@ export function parsePublicationDocument(body: string): PublicationPost[] {
       typeof (post as PublicationPost).text === "string" &&
       !Number.isNaN(new Date((post as PublicationPost).scheduledAt).getTime()),
   );
+}
+
+export interface PublicationReel {
+  video: PublicationImage;
+  cover: PublicationImage | null;
+  shareToFeed: boolean;
+  trialReel: boolean;
+  /** The post also lists images: the publishing script refuses it. */
+  hasImages: boolean;
+}
+
+/** The post's Reel, or null for an image post. */
+export function publicationReel(post: PublicationPost): PublicationReel | null {
+  if (!post.video?.attachmentId) return null;
+  return {
+    video: post.video,
+    cover: post.cover?.attachmentId ? post.cover : null,
+    shareToFeed: post.shareToFeed !== false,
+    trialReel: post.trialReel === true,
+    hasImages: (post.images?.length ?? 0) > 0,
+  };
 }
 
 /** Rewrites one post inside the document's JSON block, leaving the prose untouched. */

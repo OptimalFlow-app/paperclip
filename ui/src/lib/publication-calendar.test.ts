@@ -3,6 +3,7 @@ import {
   gridHourRange,
   networkMeta,
   parsePublicationDocument,
+  publicationReel,
   toPublicationEntries,
   updatePublicationPost,
   visibleDays,
@@ -40,6 +41,44 @@ describe("parsePublicationDocument", () => {
     expect(parsePublicationDocument("```json\n{not json\n```")).toEqual([]);
     const mixed = "```json\n" + JSON.stringify({ posts: [post, { network: "x" }, { ...post, scheduledAt: "soon" }] }) + "\n```";
     expect(parsePublicationDocument(mixed)).toHaveLength(1);
+  });
+});
+
+describe("publicationReel", () => {
+  const reel = {
+    network: "instagram",
+    scheduledAt: "2026-11-09T18:00:00+01:00",
+    status: "ready" as const,
+    text: "Reel caption",
+    video: { attachmentId: "att-video", name: "reel.mp4" },
+    cover: { attachmentId: "att-cover", name: "reel-couverture.png" },
+    trialReel: true,
+  };
+
+  it("reads a video post from the document, with feed sharing on by default", () => {
+    const doc = "```json\n" + JSON.stringify({ version: 1, posts: [reel] }) + "\n```";
+    const [parsed] = parsePublicationDocument(doc);
+    expect(publicationReel(parsed!)).toEqual({
+      video: reel.video,
+      cover: reel.cover,
+      shareToFeed: true,
+      trialReel: true,
+      hasImages: false,
+    });
+  });
+
+  it("keeps shareToFeed false, drops an empty cover and flags images alongside the video", () => {
+    expect(publicationReel({ ...reel, shareToFeed: false, trialReel: undefined, cover: { attachmentId: "" } })).toMatchObject({
+      cover: null,
+      shareToFeed: false,
+      trialReel: false,
+    });
+    expect(publicationReel({ ...reel, images: post.images })!.hasImages).toBe(true);
+  });
+
+  it("returns null for image posts", () => {
+    expect(publicationReel(post)).toBeNull();
+    expect(publicationReel({ ...post, video: { attachmentId: "" } })).toBeNull();
   });
 });
 
