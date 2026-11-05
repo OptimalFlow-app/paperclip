@@ -35,6 +35,19 @@ it("permits subscription waits only with explicit evidence that provider work ne
   } })).toBe(true);
 });
 
+it("permits a host-suspension requeue only with evidence that provider work never started", () => {
+  const suspended = {
+    runtimeMode: "legacy", status: "cancelled", errorCode: "host_suspended", scheduledRetryAttempt: 5,
+    resultJson: { executionRecovery: { kind: "host_suspended", providerWorkStarted: false } },
+  };
+  expect(legacyExecutionNeedsReconciliation(suspended)).toBe(false);
+  expect(legacyExecutionNeedsReconciliation({ ...suspended, status: "failed" })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...suspended, resultJson: {} })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...suspended, resultJson: {
+    executionRecovery: { kind: "host_suspended", providerWorkStarted: true },
+  } })).toBe(true);
+});
+
 it("allows a confirmed interrupted checkpoint without treating ordinary cancellation as replay permission", () => {
   expect(legacyExecutionNeedsReconciliation(stopped)).toBe(false);
   expect(legacyExecutionNeedsReconciliation({ ...stopped, resultJson: {} })).toBe(true);

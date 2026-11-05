@@ -39,7 +39,7 @@ import { withAdapterExecutionPhase } from "@paperclipai/adapter-utils/execution-
 import { getConversationConfirmationContext, type ConversationConfirmationContext } from "./conversation-confirmation-context.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
-import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
+import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease, HOST_SUSPENDED_ERROR_CODE, isHostSuspendedLeaseLoss, reclaimSuspendedLegacyController, type LegacyControllerLeaseLostError } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "./connector-runtime.js";
@@ -945,6 +945,13 @@ export const WORKSPACE_BUSY_RETRY_WAKE_REASON = "workspace_busy_retry";
 export const WORKSPACE_BUSY_ERROR_CODE = "workspace_busy";
 export const WORKSPACE_BUSY_RETRY_BASE_DELAY_MS = 60 * 1000;
 export const WORKSPACE_BUSY_RETRY_JITTER_MS = 60 * 1000;
+// A host suspension (sleep, frozen process) is a local resource wait, not a
+// failed attempt. Each requeue needs another real suspension, and a ceiling
+// still stops a host that keeps stalling from looping forever.
+export const HOST_SUSPENDED_RETRY_REASON = HOST_SUSPENDED_ERROR_CODE;
+export const HOST_SUSPENDED_RETRY_WAKE_REASON = "host_suspended_retry";
+export const HOST_SUSPENDED_RETRY_DELAY_MS = 30 * 1000;
+export const HOST_SUSPENDED_RETRY_MAX_ATTEMPTS = 10;
 // Preserve the one-hour shared-workspace holder cutoff independently of the
 // informational output-silence warnings. Warning sooner must not let another
 // run overtake a quiet holder and mutate its shared workspace.
@@ -15892,6 +15899,9 @@ export function heartbeatService(
         ...((retryReason === AI_CONNECTION_BUSY_RETRY_REASON || retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON)
           ? { failureRetriesBeforeAiConnectionWait: executionFailureRetryCount(run) }
           : {}),
+        ...(retryReason === HOST_SUSPENDED_RETRY_REASON
+          ? { failureRetriesBeforeHostSuspension: executionFailureRetryCount(run) }
+          : {}),
         ...(shouldQuarantineWorkspaceForRetry
           ? {
               workspaceValidationRecovery: {
@@ -16778,6 +16788,98 @@ export function heartbeatService(
           logger.error(
             { err: releaseErr, runId: run.id },
             "failed to release issue execution after workspace-busy deferral",
+          );
+        },
+      );
+    }
+
+    await finalizeAgentStatus(run.agentId, "cancelled", null, {
+      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+    }).catch(() => undefined);
+  }
+
+  // The host slept past the controller lease before provider dispatch, and
+  // this boot proved it still owns the row (reclaimSuspendedLegacyController).
+  // Requeue like a workspace wait: cancel with host_suspended, hand the issue
+  // lock to a scheduled retry, and leave the agent idle instead of in error.
+  async function finalizeHostSuspendedRequeue(
+    run: typeof heartbeatRuns.$inferSelect,
+    reason: LegacyControllerLeaseLostError,
+    logFields: {
+      logBytes?: number | null;
+      logSha256?: string | null;
+      logCompressed?: boolean;
+    } = {},
+  ) {
+    const now = new Date();
+    const cancelWrite = await setRunStatusIfRunning(run.id, "cancelled", {
+      error: reason.message,
+      errorCode: HOST_SUSPENDED_ERROR_CODE,
+      finishedAt: now,
+      resultJson: {
+        executionRecovery: {
+          kind: HOST_SUSPENDED_ERROR_CODE,
+          providerWorkStarted: false,
+        },
+      },
+      ...logFields,
+    });
+    if (!cancelWrite.updated) {
+      logger.info(
+        { runId: run.id, currentStatus: cancelWrite.run?.status ?? null },
+        "skipping host-suspended requeue because the run already left running state",
+      );
+      return;
+    }
+    await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+      finishedAt: now,
+      error: reason.message,
+    }).catch(() => undefined);
+
+    const cancelledRun =
+      cancelWrite.run ?? (await getRun(run.id).catch(() => null));
+    const agentRow = await getAgent(run.agentId).catch(() => null);
+    let scheduleOutcome: string | null = null;
+    if (cancelledRun && agentRow) {
+      const scheduleResult = await scheduleBoundedRetryForRun(
+        cancelledRun,
+        agentRow,
+        {
+          now,
+          retryReason: HOST_SUSPENDED_RETRY_REASON,
+          wakeReason: HOST_SUSPENDED_RETRY_WAKE_REASON,
+          maxAttempts: HOST_SUSPENDED_RETRY_MAX_ATTEMPTS,
+          delayMs: HOST_SUSPENDED_RETRY_DELAY_MS,
+        },
+      ).catch((scheduleErr) => {
+        logger.error(
+          { err: scheduleErr, runId: run.id },
+          "failed to schedule retry after host suspension",
+        );
+        return null;
+      });
+      scheduleOutcome = scheduleResult?.outcome ?? null;
+    }
+
+    if (cancelledRun) {
+      await appendRunEvent(cancelledRun, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message:
+          scheduleOutcome === "scheduled"
+            ? `${reason.message} before provider dispatch; the run is requeued.`
+            : `${reason.message} before provider dispatch; no retry could be scheduled, releasing the issue for other runs.`,
+        payload: { retryScheduled: scheduleOutcome === "scheduled" },
+      }).catch(() => undefined);
+    }
+
+    if (cancelledRun && scheduleOutcome !== "scheduled") {
+      await releaseIssueExecutionAndPromote(cancelledRun).catch(
+        (releaseErr) => {
+          logger.error(
+            { err: releaseErr, runId: run.id },
+            "failed to release issue execution after host suspension",
           );
         },
       );
@@ -26702,6 +26804,24 @@ export function heartbeatService(
           }
           return;
         }
+        const leaseLoss = executionControl.controller.signal.reason;
+        if (
+          !legacyAdapterEntered &&
+          isHostSuspendedLeaseLoss(leaseLoss) &&
+          (await reclaimSuspendedLegacyController(db, run).catch(() => false))
+        ) {
+          const requeueLog = handle
+            ? await runLogStore.finalize(handle).catch(() => null)
+            : null;
+          await finalizeHostSuspendedRequeue(run, leaseLoss, requeueLog
+            ? {
+                logBytes: requeueLog.bytes,
+                logSha256: requeueLog.sha256,
+                logCompressed: requeueLog.compressed,
+              }
+            : {});
+          return;
+        }
         // A process adapter may throw while its owned Stop is joining the
         // child. Let the cancellation write settle before attempting failure.
         await processRunCancellationSettlements.get(run.id)?.settled;
@@ -26945,6 +27065,20 @@ export function heartbeatService(
           errorCode: outerErr.code,
           eventMessage: "stale execution continuation cancelled before dispatch",
           suppressImmediateRecovery: true,
+        });
+      } else if (
+        !legacyAdapterEntered &&
+        isHostSuspendedLeaseLoss(executionControl.controller.signal.reason) &&
+        (await reclaimSuspendedLegacyController(db, run).catch(() => false))
+      ) {
+        await finalizeHostSuspendedRequeue(
+          run,
+          executionControl.controller.signal.reason,
+        ).catch((requeueErr) => {
+          logger.error(
+            { err: requeueErr, runId },
+            "failed to requeue run after host suspension",
+          );
         });
       } else if (isWorkspaceBusyDeferral(outerErr)) {
         // Expected contention on a shared project workspace, not a

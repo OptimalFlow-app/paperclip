@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
+import { executionFailureRetryCount, executionRetryAttemptCount } from "./execution-recovery-attempt.js";
 
 describe("failure attempts across resource waits", () => {
   it("preserves prior failures through subscription waits without trusting unrelated context", () => {
@@ -16,6 +16,13 @@ describe("failure attempts across resource waits", () => {
     expect(executionFailureRetryCount({ scheduledRetryReason: "workspace_busy", scheduledRetryAttempt: 12,
       contextSnapshot: { failureRetriesBeforeWorkspaceWait: 1 } })).toBe(1);
   });
+  it("preserves prior failures through repeated host suspensions and counts them on their own lane", () => {
+    const suspended = { scheduledRetryReason: "host_suspended", scheduledRetryAttempt: 7,
+      contextSnapshot: { failureRetriesBeforeHostSuspension: 1 } };
+    expect(executionFailureRetryCount(suspended)).toBe(1);
+    expect(executionRetryAttemptCount(suspended, "host_suspended")).toBe(7);
+    expect(executionRetryAttemptCount({ scheduledRetryReason: "transient_failure", scheduledRetryAttempt: 2 }, "host_suspended")).toBe(0);
+  });
   it("does not trust a caller-supplied count outside a server-created workspace retry", () => {
     expect(executionFailureRetryCount({ scheduledRetryReason: "transient_failure", scheduledRetryAttempt: 2,
       contextSnapshot: { failureRetriesBeforeWorkspaceWait: 0 } })).toBe(2);
@@ -27,7 +34,7 @@ describe("failure attempts across resource waits", () => {
 });
 
 describe("persisted independent accounting", () => {
-  it.each(["max_turns_continuation", "issue_disposition_repair", "workspace_busy", "ai_connection_busy", "ai_connection_pool_wait"])("%s cannot erase prior infrastructure debits or spend more", scheduledRetryReason => {
+  it.each(["max_turns_continuation", "issue_disposition_repair", "workspace_busy", "host_suspended", "ai_connection_busy", "ai_connection_pool_wait"])("%s cannot erase prior infrastructure debits or spend more", scheduledRetryReason => {
     expect(executionFailureRetryCount({ scheduledRetryReason, scheduledRetryAttempt: 20,
       contextSnapshot: { executionRetryAccounting: { version: 1, failureRetries: 2, maxTurnContinuations: 1 } },
     })).toBe(2);
