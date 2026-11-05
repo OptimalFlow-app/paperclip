@@ -1,8 +1,8 @@
 /**
  * Publication calendar (OPT-32): a Google-Calendar-style week/month view of
  * the social posts scheduled on content tasks, with a one-click hand-off per
- * post — caption and image to the clipboard / downloads, network opened in a
- * new tab. Data contract lives in `lib/publication-calendar.ts`.
+ * post — caption and image (or Reel video) to the clipboard / downloads,
+ * network opened in a new tab. Data contract lives in `lib/publication-calendar.ts`.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -30,6 +30,7 @@ import { Link, useSearchParams } from "@/lib/router";
 import { cn, issueUrl } from "../lib/utils";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
@@ -43,6 +44,7 @@ import {
   isSameDay,
   networkMeta,
   parsePublicationDocument,
+  publicationReel,
   shiftAnchor,
   startOfDay,
   toPublicationEntries,
@@ -656,7 +658,8 @@ function PostDetail({
   const toast = useOptionalToastActions();
   const queryClient = useQueryClient();
   const meta = networkMeta(entry.post.network);
-  const images = entry.post.images ?? [];
+  const reel = publicationReel(entry.post);
+  const images = reel ? [] : (entry.post.images ?? []);
   const firstImage = images[0];
   const text = entry.post.text;
   const overdue = isOverdue(entry, now);
@@ -666,6 +669,7 @@ function PostDetail({
   const handOff = async () => {
     // Text-prefilling networks get the image on the clipboard (paste it in the
     // composer); the others get the caption, and the image is downloaded.
+    // A Reel's video always goes to downloads.
     const copyImageFirst = meta.prefillsText && !!firstImage;
     try {
       if (copyImageFirst) await copyImage(firstImage);
@@ -674,7 +678,8 @@ function PostDetail({
     } catch {
       notify("Couldn't write to the clipboard — use the copy buttons below.", "warn");
     }
-    if (firstImage && !meta.prefillsText) downloadImage(firstImage);
+    if (firstImage && !meta.prefillsText) downloadAttachment(firstImage, "image.png");
+    if (reel) downloadAttachment(reel.video, "reel.mp4");
     window.open(meta.composeUrl(text), "_blank", "noopener,noreferrer");
   };
 
@@ -739,6 +744,8 @@ function PostDetail({
         <div className="flex items-center gap-2 text-xs font-medium" style={{ color: meta.color }}>
           <span className="h-2.5 w-2.5 rounded-sm" style={{ background: meta.color }} />
           {meta.label}
+          {reel ? <Badge variant="secondary">Reel</Badge> : null}
+          {reel?.trialReel ? <Badge variant="outline">Trial</Badge> : null}
           {entry.post.account ? <span className="font-normal text-muted-foreground">· {entry.post.account}</span> : null}
         </div>
         <SheetTitle className="text-lg leading-snug">{entryTitle(entry)}</SheetTitle>
@@ -798,11 +805,45 @@ function PostDetail({
                 {entry.status === "ready" ? "Unvalidate" : "Validate"}
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground">{handOffHint(meta.label, meta.prefillsText, !!firstImage)}</p>
+            <p className="text-xs text-muted-foreground">{handOffHint(meta.label, meta.prefillsText, reel ? "video" : firstImage ? "image" : null)}</p>
           </div>
         ) : (
           <div className="grid grid-cols-3 gap-2">{openTaskButton}</div>
         )}
+
+        {reel ? (
+          <section className="flex flex-col gap-2">
+            <h3 className="text-xs font-medium uppercase text-muted-foreground">Video</h3>
+            {reel.hasImages ? (
+              <p className="rounded-md border border-red-500/50 bg-red-500/10 px-3 py-2 text-sm">
+                This post also lists images: a Reel is a video alone, so the publishing script will refuse it.
+              </p>
+            ) : null}
+            <video
+              controls
+              preload="metadata"
+              src={attachmentContentUrl(reel.video.attachmentId)}
+              poster={reel.cover ? attachmentContentUrl(reel.cover.attachmentId) : undefined}
+              aria-label={reel.video.name ?? "Reel video"}
+              className="max-h-128 w-full rounded-md border border-border bg-black object-contain"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => downloadAttachment(reel.video, "reel.mp4")}>
+                <Download className="h-3.5 w-3.5" />
+                Download video
+              </Button>
+              {reel.cover ? (
+                <Button size="sm" variant="outline" onClick={() => downloadAttachment(reel.cover!, "cover.png")}>
+                  <Download className="h-3.5 w-3.5" />
+                  Download cover
+                </Button>
+              ) : null}
+              <span className="text-xs text-muted-foreground">
+                {reel.shareToFeed ? "Also shown in the profile grid" : "Reels tab only, not in the profile grid"}
+              </span>
+            </div>
+          </section>
+        ) : null}
 
         {images.length > 0 ? (
           <section className="flex flex-col gap-2">
@@ -828,7 +869,7 @@ function PostDetail({
                     <ImageIcon className="h-3.5 w-3.5" />
                     Copy image
                   </Button>
-                  <Button size="sm" variant="outline" onClick={() => downloadImage(image)}>
+                  <Button size="sm" variant="outline" onClick={() => downloadAttachment(image, "image.png")}>
                     <Download className="h-3.5 w-3.5" />
                     Download
                   </Button>
@@ -902,7 +943,11 @@ function RescheduleField({ entry, onReschedule, pending }: { entry: PublicationE
   );
 }
 
-function handOffHint(label: string, prefillsText: boolean, hasImage: boolean) {
+function handOffHint(label: string, prefillsText: boolean, media: "image" | "video" | null) {
+  if (media === "video") {
+    return `Copies the text, downloads the video and opens ${label}: create a Reel, drop in the video, paste the text (⌘V).`;
+  }
+  const hasImage = media === "image";
   if (prefillsText) {
     return hasImage
       ? `Opens ${label} with the text already filled in, and copies the image: paste it into the post (⌘V).`
@@ -913,10 +958,10 @@ function handOffHint(label: string, prefillsText: boolean, hasImage: boolean) {
     : `Copies the text and opens ${label}: create a post and paste it (⌘V).`;
 }
 
-function downloadImage(image: PublicationImage) {
+function downloadAttachment(media: PublicationImage, fallbackName: string) {
   const link = document.createElement("a");
-  link.href = attachmentContentUrl(image.attachmentId);
-  link.download = image.name ?? "image.png";
+  link.href = attachmentContentUrl(media.attachmentId);
+  link.download = media.name ?? fallbackName;
   document.body.appendChild(link);
   link.click();
   link.remove();
