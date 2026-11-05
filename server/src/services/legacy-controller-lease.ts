@@ -6,6 +6,24 @@ import { heartbeatRuns, type Db } from "@paperclipai/db";
 export const legacyControllerBootId = randomUUID();
 export const LEGACY_CONTROLLER_LEASE_MS = 60_000;
 export const LEGACY_CONTROLLER_RENEW_MS = 10_000;
+export const HOST_SUSPENDED_ERROR_CODE = "host_suspended";
+
+/** Abort reason of a lost lease. `hostSuspended` means the event loop itself
+ * stalled past the lease (sleep, frozen process): no other controller acted. */
+export class LegacyControllerLeaseLostError extends Error {
+  readonly code: string | null;
+  constructor(readonly hostSuspended: boolean) {
+    super(hostSuspended
+      ? "Legacy controller lease lost while the host was suspended"
+      : "Legacy controller lease lost");
+    this.name = "LegacyControllerLeaseLostError";
+    this.code = hostSuspended ? HOST_SUSPENDED_ERROR_CODE : null;
+  }
+}
+
+export function isHostSuspendedLeaseLoss(reason: unknown): reason is LegacyControllerLeaseLostError {
+  return reason instanceof LegacyControllerLeaseLostError && reason.hostSuspended;
+}
 
 type Run = typeof heartbeatRuns.$inferSelect;
 
@@ -62,6 +80,23 @@ export async function revokeExpiredLegacyController(db: Db, run: Run): Promise<b
   return Boolean(revoked);
 }
 
+/** Re-extend an expired lease only while this boot still owns the row. Any
+ * other controller must revoke (rotate the boot id) before acting, so a match
+ * proves nobody took over and serializes the requeue against later reapers. */
+export async function reclaimSuspendedLegacyController(
+  db: Db,
+  run: Pick<Run, "id" | "companyId">,
+): Promise<boolean> {
+  const [reclaimed] = await db.update(heartbeatRuns).set({
+    controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`,
+  }).where(and(
+    eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+    eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+    eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+  )).returning({ id: heartbeatRuns.id });
+  return Boolean(reclaimed);
+}
+
 /** Abort the adapter if the controller cannot renew. Bound each check by the
  * lease duration even when the database connection never settles. */
 export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortController) {
@@ -70,12 +105,24 @@ export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortCo
   }
   let stopped = false;
   let pending = false;
-  const lost = () => { if (!stopped) controller.abort(new Error("Legacy controller lease lost")); };
-  let deadline = setTimeout(lost, Math.max(0,
+  // The renew tick fires every few seconds while the process runs. A gap
+  // longer than the lease means the host slept or froze: the loss is local.
+  let lastTickAt = Date.now();
+  let hostSuspended = false;
+  const observeClock = () => {
+    const now = Date.now();
+    if (now - lastTickAt > LEGACY_CONTROLLER_LEASE_MS) hostSuspended = true;
+    lastTickAt = now;
+  };
+  const lost = () => {
+    if (!stopped) controller.abort(new LegacyControllerLeaseLostError(hostSuspended));
+  };
+  let deadline = setTimeout(() => { observeClock(); lost(); }, Math.max(0,
     (run.controllerLeaseExpiresAt?.getTime() ?? 0) - Date.now()));
   deadline.unref();
   const assertOwned = async (stage?: "dispatching") => {
     if (stopped) return;
+    observeClock();
     controller.signal.throwIfAborted();
     const startedAt = Date.now();
     let onAbort!: () => void;
@@ -97,11 +144,13 @@ export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortCo
     controller.signal.throwIfAborted();
     if (!stopped) {
       clearTimeout(deadline);
-      deadline = setTimeout(lost, Math.max(0, LEGACY_CONTROLLER_LEASE_MS - (Date.now() - startedAt)));
+      deadline = setTimeout(() => { observeClock(); lost(); },
+        Math.max(0, LEGACY_CONTROLLER_LEASE_MS - (Date.now() - startedAt)));
       deadline.unref();
     }
   };
   const timer = setInterval(() => {
+    observeClock();
     if (pending || stopped) return;
     pending = true;
     void assertOwned().catch(lost).finally(() => { pending = false; });

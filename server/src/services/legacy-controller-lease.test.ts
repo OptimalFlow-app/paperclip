@@ -4,7 +4,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { heartbeatService } from "./heartbeat.js";
-import { hasLiveLegacyController, legacyControllerBootId, legacyControllerClaim,
+import { HOST_SUSPENDED_ERROR_CODE, hasLiveLegacyController, isHostSuspendedLeaseLoss, legacyControllerBootId, legacyControllerClaim,
+  LEGACY_CONTROLLER_LEASE_MS, LEGACY_CONTROLLER_RENEW_MS, reclaimSuspendedLegacyController,
   renewLegacyControllerLease, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -111,7 +112,56 @@ const support = await getEmbeddedPostgresTestSupport();
       await vi.advanceTimersByTimeAsync(101);
       await checked;
       expect(controller.signal.aborted).toBe(true);
+      // The event loop kept running: a stalled database is not a host suspension.
+      expect(isHostSuspendedLeaseLoss(controller.signal.reason)).toBe(false);
     } finally { watch.stop(); vi.useRealTimers(); }
+  });
+
+  // The renewal is refused (the lease expired or another boot owns the row).
+  const refusingDb = { update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }) } as unknown as ReturnType<typeof createDb>;
+  it("classifies a lease lost across a host suspension as recoverable", async () => {
+    const run = await seed();
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const watch = watchLegacyControllerLease(refusingDb, run, controller);
+    try {
+      // The host sleeps: wall-clock time jumps past the lease, no tick ran.
+      vi.setSystemTime(Date.now() + LEGACY_CONTROLLER_LEASE_MS + 60_000);
+      await vi.advanceTimersByTimeAsync(LEGACY_CONTROLLER_RENEW_MS);
+      expect(controller.signal.aborted).toBe(true);
+      expect(isHostSuspendedLeaseLoss(controller.signal.reason)).toBe(true);
+      expect(controller.signal.reason).toMatchObject({ code: HOST_SUSPENDED_ERROR_CODE, message: expect.stringContaining("lease lost") });
+    } finally { watch.stop(); vi.useRealTimers(); }
+  });
+  it("keeps a lease lost while the host stayed awake non-recoverable", async () => {
+    const run = await seed();
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const watch = watchLegacyControllerLease(refusingDb, run, controller);
+    try {
+      await vi.advanceTimersByTimeAsync(LEGACY_CONTROLLER_RENEW_MS);
+      expect(controller.signal.aborted).toBe(true);
+      expect(controller.signal.reason).toMatchObject({ message: "Legacy controller lease lost", code: null });
+      expect(isHostSuspendedLeaseLoss(controller.signal.reason)).toBe(false);
+    } finally { watch.stop(); vi.useRealTimers(); }
+  });
+  it("reclaims an expired lease only while this boot still owns the row", async () => {
+    const run = await seed();
+    await expire(run.id);
+    expect(await reclaimSuspendedLegacyController(db, run)).toBe(true);
+    expect(await hasLiveLegacyController(db, run)).toBe(true);
+    expect(await revokeExpiredLegacyController(db, run)).toBe(false);
+
+    // Another controller revoked the expired lease first: no concurrent requeue.
+    const foreign = await seed();
+    await expire(foreign.id);
+    expect(await revokeExpiredLegacyController(db, foreign)).toBe(true);
+    expect(await reclaimSuspendedLegacyController(db, foreign)).toBe(false);
+
+    const terminal = await seed();
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, terminal.id));
+    expect(await reclaimSuspendedLegacyController(db, terminal)).toBe(false);
+    expect(await reclaimSuspendedLegacyController(db, { ...run, companyId: randomUUID() })).toBe(false);
   });
 
   it("leaves native controller ownership to the native coordinator", () => {

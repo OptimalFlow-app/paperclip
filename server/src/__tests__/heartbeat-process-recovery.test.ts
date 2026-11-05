@@ -7532,6 +7532,59 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
   });
 
+  it.each([false, true])("requeues a run whose lease was lost across a host suspension (suspended: %s)", async (suspended) => {
+    const { agentId, issueId, runId } = await seedRunFixture({ runtimeMode: "legacy", agentStatus: "idle", runStatus: "queued" });
+    // Satisfy the pre-dispatch credential gate so setup reaches the lease checks.
+    await db.update(agents).set({ adapterConfig: { env: { OPENAI_API_KEY: "test-key" } } }).where(eq(agents.id, agentId));
+    const originalWatch = controllerLeases.watchLegacyControllerLease;
+    const watcher = vi.spyOn(controllerLeases, "watchLegacyControllerLease").mockImplementation((database, run, controller) => {
+      const lease = originalWatch(database, run, controller);
+      let lostOnce = false;
+      return { ...lease, async assertOwned(stage) {
+        if (!lostOnce) {
+          lostOnce = true;
+          // The lease expires in the database while this controller is idle.
+          await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: sql`clock_timestamp() - interval '1 second'` })
+            .where(eq(heartbeatRuns.id, runId));
+          if (!suspended) {
+            // Another controller revoked the expired lease: it owns the row now.
+            await db.update(heartbeatRuns).set({ controllerBootId: randomUUID() }).where(eq(heartbeatRuns.id, runId));
+          } else {
+            // The host slept: wall-clock time jumps past the lease with no tick.
+            vi.useFakeTimers({ toFake: ["Date"] });
+            vi.setSystemTime(Date.now() + controllerLeases.LEGACY_CONTROLLER_LEASE_MS + 60_000);
+          }
+        }
+        return lease.assertOwned(stage);
+      } };
+    });
+    const heartbeat = heartbeatService(db);
+    try {
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.drainActiveRunExecutions();
+    } finally {
+      vi.useRealTimers();
+      watcher.mockRestore();
+    }
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    const lost = await heartbeat.getRun(runId);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const retries = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId));
+    if (suspended) {
+      expect(lost).toMatchObject({ status: "cancelled", errorCode: "host_suspended" });
+      expect(retries).toHaveLength(1);
+      expect(retries[0]).toMatchObject({ status: "scheduled_retry", scheduledRetryReason: "host_suspended" });
+      expect(agent!.status).toBe("idle");
+      expect(issue!.status).not.toBe("blocked");
+      expect(issue!.executionRunId).toBe(retries[0]!.id);
+    } else {
+      // Unchanged: the foreign controller keeps ownership, nothing is requeued here.
+      expect(lost).toMatchObject({ status: "failed", error: "Legacy controller lease lost" });
+      expect(retries.filter((retry) => retry.scheduledRetryReason === "host_suspended")).toEqual([]);
+    }
+  });
+
   it.each([false, true])("dispatches interrupted CLI input and cleans up early fixture exits (%s)", async (earlyExit) => {
     const actualProcess = await vi.importActual<typeof import("../adapters/process/execute.js")>("../adapters/process/execute.js");
     const { companyId, agentId, issueId, runId } = await seedRunFixture({
